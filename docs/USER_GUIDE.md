@@ -47,7 +47,9 @@ target_link_libraries(my_target PRIVATE pd::polydecomp)
 
 CMake options: `PD_WITH_GMP` (exact kernel; default ON), `PD_BUILD_TESTS`, `PD_BUILD_EXAMPLES`,
 `PD_WITH_CGAL` (CGAL baselines in `pd_bench`), `PD_FUZZ` (libFuzzer targets, clang). Without GMP
-the library provides the double-precision kernels only (preset `gcc-nogmp`).
+the library provides the double-precision kernels only (preset `gcc-nogmp`); there the double
+kernel's ordering of two chord crossings along a ray has no exact fallback and decides near ties
+in floating point (orientation tests stay exact).
 
 Presets: `gcc-debug`, `gcc-release`, `clang-debug`, `clang-release`, `gcc-asan`, `clang-asan`
 (AddressSanitizer and UndefinedBehaviorSanitizer), `gcc-nogmp`, `gcc-bench` (with CGAL) and
@@ -273,4 +275,7 @@ legacy inputs, decomposes and certifies 5000 generated polygons, checks them wit
 independent GEOS oracle, runs the floating-point census and the benchmarks against CGAL, and
 writes all tables to `build/paper-results/`. It needs GMP, CGAL and the oracle's Python
 environment (`scripts/oracle/setup_venv.sh`). Timings depend on the machine; the script
-records the processor and its frequency policy.
+records the processor and its frequency policy. It also records the double kernel with exact
+retry on the census inputs (`RETRY.txt`), the test count (`TESTS.txt`) and the degenerate set
+(`DEGENERATE.txt`). The fuzzing campaign is run separately with `scripts/run_fuzz.sh [SECONDS]`
+(clang, preset `clang-fuzz`; logs in `build/clang-fuzz/`).

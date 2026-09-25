@@ -230,13 +230,16 @@ PolygonWithHoles<double> adversarial_attempt(Family f, Rng& g)
   PolygonWithHoles<double> p{outer_square(), {}};
   switch (f) {
   case Family::NearCollinear: {
-    p.outer = subdivide_nudged(g, outer_square(), g.integer(2, 6));
+    // Shifted to [1, 11]^2: a one-ulp nudge of a coordinate 0 would be a
+    // subnormal, outside the double kernel's coordinate range.
+    p.outer = subdivide_nudged(g, {{1, 1}, {1 + kSize, 1}, {1 + kSize, 1 + kSize}, {1, 1 + kSize}},
+                               g.integer(2, 6));
     const int m = g.integer(2, 4);
     const double step = kSize / (m + 1), s = step / 4;
     for (int i = 1; i <= m; ++i)
       for (int j = 1; j <= m; ++j) {
         if (g.uniform() < 0.3) continue;
-        const double cx = step * i, cy = step * j;
+        const double cx = 1 + step * i, cy = 1 + step * j;
         p.holes.push_back(subdivide_nudged(
             g, {{cx - s, cy - s}, {cx + s, cy - s}, {cx + s, cy + s}, {cx - s, cy + s}}, g.integer(2, 5)));
       }

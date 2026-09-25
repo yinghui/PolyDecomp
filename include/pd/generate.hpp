@@ -25,7 +25,7 @@ enum class Family {
   /// Numerically adversarial families (valid inputs, hard for floating point),
   /// not rounded to 1e-5. NearCollinear and NearTouch use only grid coordinates
   /// and one-ulp nudges (no libm), so they are bit-for-bit reproducible.
-  NearCollinear,  ///< edges subdivided by vertices a few ulps off the edge line
+  NearCollinear,  ///< edges subdivided by vertices a few ulps off the edge line (in [1, 11]^2)
   NearTouch,      ///< rectangular holes 2^-30 apart from each other and the boundary
   Snapped,        ///< a mixed cluster snapped to a 1/8 grid (exact collinearities)
 };
@@ -39,7 +39,7 @@ const char* name(Family f);
 Family family_from_name(const std::string& s);
 
 /// A valid polygon with holes of the given family, inside the square
-/// [0, 10] x [0, 10]. Deterministic in (family, seed).
+/// [0, 10] x [0, 10] ([1, 11] x [1, 11] for NearCollinear). Deterministic in (family, seed).
 PolygonWithHoles<double> generate(Family f, std::uint64_t seed);
 
 /// Axis-aligned comb with `teeth` teeth of height h (no holes), counter-clockwise,

@@ -76,3 +76,15 @@ TEST_CASE("star polygons and spiral holes are valid and deterministic")
   CHECK(pd::validate<pd::DoubleKernel>(sp).ok());
   CHECK(wkt(sp) == wkt(pd::gen::spiral_holes(40, 3)));
 }
+
+TEST_CASE("adversarial families generate every census seed")
+{
+  // Regression: nudging a coordinate 0 by one ulp gave a subnormal, which the
+  // double kernel's coordinate-range check rejects, so some seeds failed.
+  for (pd::gen::Family f : pd::gen::adversarial_families())
+    for (std::uint64_t seed = 1; seed <= 300; ++seed) {
+      CAPTURE(pd::gen::name(f));
+      CAPTURE(seed);
+      CHECK(pd::validate<pd::DoubleKernel>(pd::gen::generate(f, seed)).ok());
+    }
+}
