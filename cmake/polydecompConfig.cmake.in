@@ -1,0 +1,11 @@
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+set(polydecomp_WITH_GMP @PD_WITH_GMP@)
+if(polydecomp_WITH_GMP)
+  find_dependency(PkgConfig)
+  pkg_check_modules(PD_GMPXX REQUIRED IMPORTED_TARGET gmpxx gmp)
+endif()
+
+include("${CMAKE_CURRENT_LIST_DIR}/polydecompTargets.cmake")
+check_required_components(polydecomp)

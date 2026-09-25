@@ -1,0 +1,18 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+title: "polydecomp: exact and robust decomposition of polygons with holes into convex pieces"
+version: 1.0.0
+date-released: 2026-09-25
+license: BSD-3-Clause
+authors:
+  - family-names: Zhang
+    given-names: Yinghui
+    affiliation: "Department of Computing, University of Northampton"
+    email: yinghui.zhang@northampton.ac.uk
+keywords:
+  - computational geometry
+  - polygon decomposition
+  - convex partition
+  - polygons with holes
+  - exact arithmetic
+  - robust geometric computation

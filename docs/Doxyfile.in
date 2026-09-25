@@ -1,0 +1,24 @@
+PROJECT_NAME           = "polydecomp"
+PROJECT_NUMBER         = @PROJECT_VERSION@
+PROJECT_BRIEF          = "Exact and robust decomposition of polygons with holes into convex pieces"
+OUTPUT_DIRECTORY       = @CMAKE_CURRENT_BINARY_DIR@/docs
+INPUT                  = @PROJECT_SOURCE_DIR@/docs/USER_GUIDE.md @PROJECT_SOURCE_DIR@/include/pd
+USE_MDFILE_AS_MAINPAGE = @PROJECT_SOURCE_DIR@/docs/USER_GUIDE.md
+RECURSIVE              = YES
+FILE_PATTERNS          = *.hpp *.md
+STRIP_FROM_PATH        = @PROJECT_SOURCE_DIR@/include
+STRIP_FROM_INC_PATH    = @PROJECT_SOURCE_DIR@/include
+EXCLUDE_SYMBOLS        = pd::detail pd::detail::*
+EXTRACT_ALL            = YES
+EXTRACT_STATIC         = YES
+PREDEFINED             = PD_HAVE_GMP=1
+ENABLE_PREPROCESSING   = YES
+MACRO_EXPANSION        = NO
+JAVADOC_AUTOBRIEF      = YES
+MARKDOWN_SUPPORT       = YES
+GENERATE_LATEX         = NO
+GENERATE_HTML          = YES
+HAVE_DOT               = @PD_HAVE_DOT@
+QUIET                  = YES
+WARN_IF_UNDOCUMENTED   = NO
+WARN_LOGFILE           = @CMAKE_CURRENT_BINARY_DIR@/docs/doxygen-warnings.txt
