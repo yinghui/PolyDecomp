@@ -54,8 +54,9 @@ Ring<double> star_polygon(int n, std::uint64_t seed);
 /// farthest-pair cuts leave most holes on one side, so the recursion is deep.
 PolygonWithHoles<double> spiral_holes(int h, std::uint64_t seed);
 
-/// Hand-made degenerate inputs: {name, polygon}. Each forces a fallback or
-/// special case of the hole-elimination stage.
+/// Hand-made degenerate inputs: {name, polygon}. Each forces a contact (a cut
+/// line through vertices or along edges), a dangling contact, or a fallback of
+/// the hole-elimination stage.
 std::vector<std::pair<std::string, PolygonWithHoles<double>>> degenerate_set();
 
 } // namespace pd::gen

@@ -5,34 +5,44 @@
 /// Stage 1: hole elimination by line cuts.
 ///
 /// A node is an outer ring (counter-clockwise) with the input holes it contains.
-/// Each cut is a line that pierces at least one of the node's holes:
+/// Each cut is a line that crosses at least one of the node's holes:
 ///  - one hole: the line through the anchor a = (v_{m-1} + v_m + v_{m+1}) / 3,
 ///    v_m being the outer vertex nearest to the hole's vertex-average centroid
 ///    c, and c itself;
 ///  - two or more holes: the line through the centroids of the two holes whose
 ///    centroids are farthest apart.
-/// If that preferred line passes exactly through a vertex of the node, or has
-/// no direction (coincident centroids, a == c), it is replaced by a line through
-/// a point q of one of those holes: its centroid, or, if the centroid is itself
-/// a vertex, the midpoint of the hole's longest edge. The direction is taken in
-/// the widest angular gap between the directions from q to the node's vertices.
-/// A cut line therefore never passes through a vertex. It crosses the ring of
-/// the hole through q at least twice (q is interior to the hole's convex hull,
-/// or a transverse crossing point), so every cut pierces a hole and at most h
-/// cuts occur, with no general-position assumption.
+/// The line may pass through vertices and run along edges ("contacts"). Only
+/// if it has no direction (coincident centroids, a == c) is it replaced by a
+/// line through a point q of a hole in a vertex-free direction (the fallback);
+/// floating-point kernels also fall back when a vertex lies within their
+/// clearance of the line without lying on it, and for a dangling contact.
 ///
-/// The line meets the rings at crossings x_1 < ... < x_m (m even) along its
-/// direction; the region occupies the segments (x_{2i-1}, x_{2i}). The pieces on
-/// the left of the line are traced by walking a segment x_{2i-1} -> x_{2i} and
-/// then the ring arc that leaves x_{2i} to the left, up to the next crossing on
-/// that ring; each closed walk is one simple piece. The pieces on the right are
-/// traced by the same walk on the reversed line. Pierced holes become notches of
-/// the pieces; the other holes go to the piece that contains them.
+/// Pieces on each side S of the line are traced as if the line were shifted
+/// infinitesimally into S. An edge then contributes a crossing to the list of
+/// side S if the line crosses its interior, or if one endpoint lies on the line
+/// and the other strictly on S; in the second case the crossing point is that
+/// endpoint. So a vertex whose edges lie on both sides is listed once on each
+/// side; a vertex whose edges both lie on S is listed twice on S and not on the
+/// other side; and a run of edges on the line contributes its end vertices to
+/// the sides its two outer edges lie on. Two copies of one vertex are ordered
+/// by the direction of their edges. Each list is walked as before: from a
+/// crossing x_{2i-1} along the line to x_{2i}, then along the ring towards S
+/// up to the next crossing on that ring; each closed walk is one piece, and
+/// repeated consecutive vertices (zero-length segments) are removed.
+///
+/// A hole that meets the line in a single vertex v, lying otherwise on one side
+/// (a dangling contact), would make a piece that touches itself at v. The exact
+/// path splits such a hole with the point c = v + ε d (ε an infinitesimal, see
+/// kernel/symbolic.hpp), turning the contact into an edge on the line; the
+/// result is evaluated at ε = 0, where that piece is weakly simple (it touches
+/// itself at v). Convex decomposition of the perturbed pieces then yields
+/// convex pieces that tile the input (see decompose).
 
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <string>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -40,6 +50,12 @@
 #include "pd/geometry.hpp"
 #include "pd/status.hpp"
 #include "pd/validate.hpp"
+#ifdef PD_HAVE_GMP
+#include <gmpxx.h>
+
+#include "pd/kernel/exact.hpp"
+#include "pd/kernel/symbolic.hpp"
+#endif
 
 namespace pd {
 
@@ -59,10 +75,14 @@ struct HoleElimStats {
   std::size_t holes = 0;
   std::size_t cuts = 0;
   std::size_t max_depth = 0;
-  std::size_t max_crossings = 0;          ///< most crossings of a single cut
+  std::size_t max_crossings = 0;          ///< most crossings on one side of a single cut
+  std::size_t vertex_contacts = 0;        ///< vertices on a cut line (not on an edge run)
+  std::size_t edge_contacts = 0;          ///< runs of edges lying on a cut line
+  std::size_t dangles = 0;                ///< holes split symbolically (dangling contacts)
   std::size_t fallback_rotated = 0;       ///< cuts that used CutFallback::Rotated
   std::size_t fallback_midpoint = 0;      ///< cuts that used CutFallback::EdgeMidpoint
   std::size_t degenerate_directions = 0;  ///< preferred line had no direction
+  bool symbolic = false;                  ///< computed with the symbolic kernel (then ε = 0)
 };
 
 template <class FT>
@@ -79,11 +99,14 @@ struct HoleNode {
 
 template <class FT>
 struct HoleElimination {
-  std::vector<Point<FT>> pool;                     ///< input vertices (outer, then holes), then crossings
+  std::vector<Point<FT>> pool;                     ///< input vertices (outer, then holes), then constructed points
   std::vector<std::vector<std::uint32_t>> leaves;  ///< hole-free pieces, CCW, as pool ids
   std::vector<HoleNode<FT>> tree;                  ///< tree[0] is the root (if kept)
   HoleElimStats stats;
   Diagnostics diag;
+  /// Internal: an exact run met a dangling contact and must be redone with the
+  /// symbolic kernel (eliminate_holes and decompose do this automatically).
+  bool needs_symbolic = false;
 
   bool ok() const { return diag.status == Status::Ok; }
   Ring<FT> leaf_ring(std::size_t i) const
@@ -109,6 +132,20 @@ struct Corner1 {
   std::uint32_t line;  ///< line containing the edge from this vertex to the next
 };
 
+/// Removes consecutive repeated vertices (zero-length edges) from a closed
+/// walk, keeping the entry whose outgoing edge has positive length.
+inline void drop_repeats(std::vector<Corner1>& piece)
+{
+  std::vector<Corner1> out;
+  out.reserve(piece.size());
+  for (std::size_t i = 0; i < piece.size(); ++i) {
+    if (i + 1 < piece.size() && piece[i + 1].v == piece[i].v) continue;
+    out.push_back(piece[i]);
+  }
+  while (out.size() > 1 && out.back().v == out.front().v) out.pop_back();
+  piece = std::move(out);
+}
+
 template <class K>
 class HoleEliminator {
 public:
@@ -128,10 +165,12 @@ private:
     bool degenerate_direction = false;
   };
   struct Crossing {
-    FT t;               // position along the cut direction
-    std::uint32_t v;    // pool id of the crossing point
-    int ring;           // -1: the node's outer ring; otherwise an input hole index
-    std::uint32_t edge; // edge of that ring containing the crossing
+    FT t;                 // position along the cut direction
+    std::uint32_t v;      // pool id of the crossing point (the vertex itself for a contact)
+    int ring;             // -1: the node's outer ring; otherwise an input hole index
+    std::uint32_t edge;   // edge of that ring containing the crossing
+    bool contact = false; // the crossing point is an endpoint of the edge, on the line
+    std::uint32_t far = 0;  // contact: pool id of the edge's other endpoint (strictly on the side)
   };
   struct Work {
     std::vector<Corner1> outer;
@@ -145,8 +184,11 @@ private:
   const Status broken_;
   std::vector<Line<FT>> lines_;
   std::vector<std::uint32_t> hole_off_, hole_len_;
+  std::vector<std::vector<std::uint32_t>> hole_line_;  ///< line id of each hole edge
   double scale_ = 1;  ///< largest absolute input coordinate (at least 1)
   double tol_ = 0;    ///< K::clearance * scale_ (0: exact incidence only)
+
+  static constexpr bool floating = !is_exact_kernel<K>::value;
 
   /// Distance from w to the line through q and q2, in double precision.
   double distance_to_line(const Point<FT>& q, const Point<FT>& q2, const Point<FT>& w) const
@@ -162,6 +204,20 @@ private:
     return false;
   }
   const Point<FT>& pt(std::uint32_t id) const { return out_.pool[id]; }
+
+  // Ring access: ring -1 is the node's outer ring, otherwise an input hole index.
+  std::uint32_t ring_len(const Work& w, int ring) const
+  {
+    return ring < 0 ? static_cast<std::uint32_t>(w.outer.size()) : hole_len_[ring];
+  }
+  std::uint32_t vid(const Work& w, int ring, std::uint32_t k) const
+  {
+    return ring < 0 ? w.outer[k].v : hole_off_[ring] + k;
+  }
+  std::uint32_t lid(const Work& w, int ring, std::uint32_t k) const
+  {
+    return ring < 0 ? w.outer[k].line : hole_line_[ring][k];
+  }
 
   template <class F>
   void for_each_vertex(const Work& w, F f) const
@@ -183,7 +239,7 @@ private:
   }
 
   /// True if no vertex of the node lies on the line through q and q2 (or, in a
-  /// floating-point kernel, within tol_ of it).
+  /// floating-point kernel, within tol_ of it). Used for fallback lines.
   bool line_avoids_vertices(const Work& w, const Point<FT>& q, const Point<FT>& q2) const
   {
     bool ok = true;
@@ -191,6 +247,46 @@ private:
       ok = ok && K::orient(q, q2, pt(id)) != 0 && (tol_ == 0 || distance_to_line(q, q2, pt(id)) > tol_);
     });
     return ok;
+  }
+
+  /// Index (in ring order) of the single vertex of hole h on the line, if the
+  /// hole meets the line only there and lies otherwise on one side (a dangling
+  /// contact); -1 otherwise. `sign` receives that side.
+  long dangling_vertex(int h, const Point<FT>& q, const Point<FT>& q2, int& sign) const
+  {
+    long on = -1;
+    int side = 0;
+    for (std::uint32_t k = 0; k < hole_len_[h]; ++k) {
+      const int o = K::orient(q, q2, pt(hole_off_[h] + k));
+      if (o == 0) {
+        if (on >= 0) return -1;  // two or more vertices on the line
+        on = static_cast<long>(k);
+      } else if (side == 0) {
+        side = o;
+      } else if (o != side) {
+        return -1;  // the line crosses the hole
+      }
+    }
+    sign = side;
+    return on;
+  }
+
+  /// Whether the preferred line can be used as it is. Exact kernels handle every
+  /// contact; floating-point kernels need every vertex either exactly on the line
+  /// or beyond their clearance, and no dangling contact (no symbolic split).
+  bool line_usable(const Work& w, const Point<FT>& q, const Point<FT>& q2) const
+  {
+    if constexpr (!floating) {
+      return true;
+    } else {
+      bool ok = true;
+      for_each_vertex(w, [&](std::uint32_t id) {
+        ok = ok && (tol_ == 0 || K::orient(q, q2, pt(id)) == 0 || distance_to_line(q, q2, pt(id)) > tol_);
+      });
+      int side;
+      for (int h : w.holes) ok = ok && dangling_vertex(h, q, q2, side) < 0;
+      return ok;
+    }
   }
 
   /// True if q is a vertex of the node (or, in a floating-point kernel, within tol_ of one).
@@ -204,6 +300,80 @@ private:
                                     K::to_double(v.y) - K::to_double(q.y)) <= tol_);
     });
     return hit;
+  }
+
+  /// For two contact crossings at the same vertex v on the side `sign`, with far
+  /// endpoints a and b: true if the copy on the edge to a comes first along d
+  /// when the line is shifted infinitesimally into that side. The shifted line
+  /// meets the edge to w at the offset ((w - v) . d) / |d x (w - v)| along d.
+  bool shifted_before(int sign, const Point<FT>& v, const Point<FT>& a, const Point<FT>& b,
+                      const Point<FT>& d) const
+  {
+    auto decide = [&](auto X, auto conv) {
+      using T = decltype(X);
+      const T dx = conv(d.x), dy = conv(d.y), vx = conv(v.x), vy = conv(v.y);
+      const T ax = conv(a.x) - vx, ay = conv(a.y) - vy, bx = conv(b.x) - vx, by = conv(b.y) - vy;
+      const T da = ax * dx + ay * dy, db = bx * dx + by * dy;  // along d
+      const T ca = dx * ay - dy * ax, cb = dx * by - dy * bx;  // across (sign = side)
+      const T det = da * cb - db * ca;
+      return (det > 0) - (det < 0);
+    };
+    int s;
+    if constexpr (!floating) {
+      s = decide(FT(0), [](const FT& x) { return x; });
+    } else {
+#ifdef PD_HAVE_GMP
+      s = decide(mpq_class(0), [](const FT& x) { return mpq_class(double(x)); });
+#else
+      s = decide(0.0L, [](const FT& x) { return static_cast<long double>(x); });
+#endif
+    }
+    return sign * s < 0;
+  }
+
+  /// Splits the dangling hole h at its vertex k (on the line, the rest of the
+  /// hole on side `sign`) with c = v + ε d, inserted next to the neighbour whose
+  /// direction is closer to d, so that the quad stays simple. Symbolic kernel only.
+  void split_dangle(int h, std::uint32_t k, int sign, const Point<FT>& d, std::uint32_t cut_line)
+  {
+    if constexpr (is_symbolic_kernel<K>::value) {
+      const std::uint32_t len = hole_len_[h], off = hole_off_[h];
+      const std::uint32_t kp = (k + len - 1) % len, kn = (k + 1) % len;
+      const Point<FT> v = pt(off + k);
+      const Point<FT> c{v.x + FT::eps() * d.x, v.y + FT::eps() * d.y};
+      // The neighbour closer in angle to d borders the sliver triangle (v, c, w).
+      const bool after = sign * K::orient(v, pt(off + kn), pt(off + kp)) > 0;
+      std::vector<Point<FT>> ring;
+      std::vector<std::uint32_t> lines;
+      for (std::uint32_t j = 0; j < len; ++j) {
+        const std::uint32_t old_line = hole_line_[h][j];
+        if (j == k && after) {  // ..., v, c, kn, ...: v -> c on the cut line, c -> kn new
+          ring.push_back(v);
+          lines.push_back(cut_line);
+          ring.push_back(c);
+          const Point<FT>& wn = pt(off + kn);
+          lines.push_back(static_cast<std::uint32_t>(lines_.size()));
+          lines_.push_back({c, {wn.x - c.x, wn.y - c.y}});
+        } else if (j == kp && !after) {  // ..., kp, c, v, ...: kp -> c new, c -> v on the cut line
+          const Point<FT>& wp = pt(off + kp);
+          ring.push_back(wp);
+          lines.push_back(static_cast<std::uint32_t>(lines_.size()));
+          lines_.push_back({wp, {c.x - wp.x, c.y - wp.y}});
+          ring.push_back(c);
+          lines.push_back(cut_line);
+        } else {
+          ring.push_back(pt(off + j));
+          lines.push_back(old_line);
+        }
+      }
+      hole_off_[h] = static_cast<std::uint32_t>(out_.pool.size());
+      hole_len_[h] = static_cast<std::uint32_t>(ring.size());
+      for (Point<FT>& p : ring) out_.pool.push_back(std::move(p));
+      hole_line_[h] = std::move(lines);
+      ++out_.stats.dangles;
+    } else {
+      (void)h, (void)k, (void)sign, (void)d, (void)cut_line;
+    }
   }
 
   Cut choose_cut(const Work& w) const;
@@ -264,8 +434,7 @@ typename HoleEliminator<K>::Cut HoleEliminator<K>::choose_cut(const Work& w) con
 
   Cut cut;
   cut.degenerate_direction = (d0.x == 0 && d0.y == 0);
-  if (!cut.degenerate_direction &&
-      line_avoids_vertices(w, q0, Point<FT>{q0.x + d0.x, q0.y + d0.y})) {
+  if (!cut.degenerate_direction && line_usable(w, q0, Point<FT>{q0.x + d0.x, q0.y + d0.y})) {
     cut.q = q0;
     cut.d = d0;
     return cut;
@@ -339,6 +508,8 @@ Point<typename K::FT> HoleEliminator<K>::vertex_free_direction(const Work& w, co
   return direction(dyadic_between(gaps.front().first, gaps.front().second));  // best effort
 }
 
+/// Traces the pieces on one side (sign +1: left of the line, -1: right) from
+/// that side's crossing list (`order`: ascending along the cut direction).
 template <class K>
 bool HoleEliminator<K>::trace_side(int sign, std::uint32_t line_id, const Point<FT>& q,
                                    const Point<FT>& q2, const std::vector<Crossing>& xs,
@@ -354,14 +525,11 @@ bool HoleEliminator<K>::trace_side(int sign, std::uint32_t line_id, const Point<
   for (std::size_t p = 0; p < m; ++p) pos[seq[p]] = p;
   std::vector<bool> used(m, false);
 
-  auto ring_len = [&](int ring) -> std::uint32_t {
-    return ring < 0 ? static_cast<std::uint32_t>(w.outer.size()) : hole_len_[ring];
-  };
-  auto vid = [&](int ring, std::uint32_t k) -> std::uint32_t {
-    return ring < 0 ? w.outer[k].v : hole_off_[ring] + k;
-  };
-  auto lid = [&](int ring, std::uint32_t k) -> std::uint32_t {
-    return ring < 0 ? w.outer[k].line : hole_off_[ring] + k;  // input hole edge k has line id = its start vertex id
+  // Side of a vertex relative to the line shifted into this side: a vertex on
+  // the line lies on the far side.
+  auto on_this_side = [&](std::uint32_t id) {
+    const int o = K::orient(q, q2, pt(id));
+    return (o != 0 ? o : -sign) == sign;
   };
 
   for (std::size_t start = 0; start < m; start += 2) {
@@ -373,34 +541,36 @@ bool HoleEliminator<K>::trace_side(int sign, std::uint32_t line_id, const Point<
       const std::size_t xa = seq[p], xb = seq[p + 1];
       if (used[xa] || used[xb]) return fail(broken_, "a piece walk reuses a crossing");
       used[xa] = used[xb] = true;
-      piece.push_back({xs[xa].v, line_id});  // material segment xa -> xb on the cut line
+      piece.push_back({xs[xa].v, line_id});  // segment xa -> xb on the cut line
 
       // The ring arc leaving xb on this side, up to the next crossing on that ring.
       const Crossing& cb = xs[xb];
-      const std::uint32_t len = ring_len(cb.ring);
+      const std::uint32_t len = ring_len(w, cb.ring);
       const std::uint32_t e = cb.edge, en = (e + 1) % len;
-      const bool forward = sign * K::orient(q, q2, pt(vid(cb.ring, en))) > 0;
-      piece.push_back({cb.v, lid(cb.ring, e)});
+      const bool forward = on_this_side(vid(w, cb.ring, en));
+      piece.push_back({cb.v, lid(w, cb.ring, e)});
       std::size_t xc;
       if (forward) {
         xc = ring_next[xb];
         const std::uint32_t f = xs[xc].edge;
         for (std::uint32_t k = en;; k = (k + 1) % len) {
-          piece.push_back({vid(cb.ring, k), lid(cb.ring, k)});
+          piece.push_back({vid(w, cb.ring, k), lid(w, cb.ring, k)});
           if (k == f) break;
         }
       } else {
         xc = ring_prev[xb];
         const std::uint32_t stop = (xs[xc].edge + 1) % len;
         for (std::uint32_t k = e;; k = (k + len - 1) % len) {
-          piece.push_back({vid(cb.ring, k), lid(cb.ring, (k + len - 1) % len)});
+          piece.push_back({vid(w, cb.ring, k), lid(w, cb.ring, (k + len - 1) % len)});
           if (k == stop) break;
         }
       }
       p = pos[xc];
-      if (p % 2 != 0) return fail(broken_, "a ring arc ends at the far end of a material segment");
+      if (p % 2 != 0) return fail(broken_, "a ring arc ends at the far end of a segment on the line");
       if (xc == seq[start]) break;  // back at the start: the piece is closed
     }
+    drop_repeats(piece);
+    if (piece.size() < 3) return fail(broken_, "a piece has fewer than 3 vertices");
     pieces.push_back(std::move(piece));
   }
   return true;
@@ -414,70 +584,125 @@ bool HoleEliminator<K>::cut_node(Work& w, std::vector<Work>& stack)
   const auto line_id = static_cast<std::uint32_t>(lines_.size());
   lines_.push_back({cut.q, cut.d});
 
-  // ---- crossings, ring by ring in edge order
-  std::vector<Crossing> xs;
-  std::vector<std::pair<std::size_t, std::size_t>> groups;  // [begin, end) of each crossed ring
-  auto scan = [&](int ring, std::uint32_t len, auto vid, auto lid) {
-    const std::size_t begin = xs.size();
-    for (std::uint32_t e = 0; e < len; ++e) {
-      const int oa = K::orient(cut.q, q2, pt(vid(e)));
-      const int ob = K::orient(cut.q, q2, pt(vid((e + 1) % len)));
-      if (oa == 0 || ob == 0) return fail(broken_, "the cut line passes through a vertex");
-      if (oa == ob) continue;
-      Point<FT> x = intersect_lines(lines_[line_id], lines_[lid(e)]);
-      if constexpr (!is_exact_kernel<K>::value) {
-        const Point<FT>& ea = pt(vid(e));
-        const Point<FT>& eb = pt(vid((e + 1) % len));
-        if (!point_finite(x) || !near_box(ea, eb, x, 1e-9 * scale_))
-          x = intersect_through(cut.q, q2, ea, eb);
-      }
-      if (!point_finite(x)) return fail(broken_, "a constructed point is not finite");
-      const FT t = (x.x - cut.q.x) * cut.d.x + (x.y - cut.q.y) * cut.d.y;
-      xs.push_back({t, static_cast<std::uint32_t>(out_.pool.size()), ring, e});
-      out_.pool.push_back(x);
-    }
-    if (xs.size() > begin) groups.emplace_back(begin, xs.size());
-    return true;
-  };
-  if (!scan(-1, static_cast<std::uint32_t>(w.outer.size()),
-            [&](std::uint32_t k) { return w.outer[k].v; },
-            [&](std::uint32_t k) { return w.outer[k].line; }))
-    return false;
-  std::vector<int> pierced;
+  // ---- dangling contacts: split symbolically (exact kernels), never in floating ones
   for (int h : w.holes) {
-    const std::size_t before = xs.size();
-    if (!scan(h, hole_len_[h], [&](std::uint32_t k) { return hole_off_[h] + k; },
-              [&](std::uint32_t k) { return hole_off_[h] + k; }))
-      return false;
-    if (xs.size() > before) pierced.push_back(h);
+    int side = 0;
+    const long k = dangling_vertex(h, cut.q, q2, side);
+    if (k < 0) continue;
+    if constexpr (floating) {
+      return fail(broken_, "a cut line touches a hole at a single vertex");
+    } else if constexpr (!is_symbolic_kernel<K>::value) {
+      out_.needs_symbolic = true;
+      return fail(Status::InternalError, "a dangling contact needs the symbolic kernel");
+    } else {
+      split_dangle(h, static_cast<std::uint32_t>(k), side, cut.d, line_id);
+    }
   }
 
-  const std::size_t m = xs.size();
-  if (pierced.empty()) return fail(broken_, "a cut pierces no hole");
-  if (m % 2 != 0) return fail(broken_, "odd number of crossings");
-  for (const auto& g : groups)
-    if ((g.second - g.first) % 2 != 0) return fail(broken_, "a ring is crossed an odd number of times");
-
-  std::vector<std::size_t> order(m);
-  for (std::size_t i = 0; i < m; ++i) order[i] = i;
-  std::sort(order.begin(), order.end(), [&](std::size_t a, std::size_t b) { return xs[a].t < xs[b].t; });
-  for (std::size_t i = 0; i + 1 < m; ++i)
-    if (!(xs[order[i]].t < xs[order[i + 1]].t)) return fail(broken_, "two crossings coincide");
-  if (xs[order.front()].ring != -1 || xs[order.back()].ring != -1)
-    return fail(broken_, "the outermost crossings are not on the outer ring");
-
-  std::vector<std::size_t> ring_next(m), ring_prev(m);
-  for (const auto& g : groups)
-    for (std::size_t i = g.first; i < g.second; ++i) {
-      ring_next[i] = i + 1 < g.second ? i + 1 : g.first;
-      ring_prev[i] = i > g.first ? i - 1 : g.second - 1;
+  // ---- side of every vertex, contacts
+  std::vector<int> rings{-1};
+  for (int h : w.holes) rings.push_back(h);
+  std::vector<std::vector<int>> side_of(rings.size());
+  for (std::size_t r = 0; r < rings.size(); ++r) {
+    const std::uint32_t len = ring_len(w, rings[r]);
+    side_of[r].resize(len);
+    for (std::uint32_t k = 0; k < len; ++k) side_of[r][k] = K::orient(cut.q, q2, pt(vid(w, rings[r], k)));
+    // Runs of consecutive vertices on the line: single vertices and edge runs.
+    for (std::uint32_t k = 0; k < len; ++k) {
+      if (side_of[r][k] != 0 || side_of[r][(k + len - 1) % len] == 0) continue;  // not the start of a run
+      std::uint32_t run = 0;
+      while (run < len && side_of[r][(k + run) % len] == 0) ++run;
+      if (run == 1) ++out_.stats.vertex_contacts;
+      else ++out_.stats.edge_contacts;
     }
+  }
+  auto t_of = [&](const Point<FT>& x) -> FT { return (x.x - cut.q.x) * cut.d.x + (x.y - cut.q.y) * cut.d.y; };
 
-  // ---- pieces: left of the line, then right
+  // ---- proper crossings (shared by both sides), constructed once
+  std::vector<std::vector<long>> proper(rings.size());
+  std::vector<std::vector<FT>> proper_t(rings.size());
+  for (std::size_t r = 0; r < rings.size(); ++r) {
+    const int ring = rings[r];
+    const std::uint32_t len = ring_len(w, ring);
+    proper[r].assign(len, -1);
+    proper_t[r].resize(len);
+    for (std::uint32_t e = 0; e < len; ++e) {
+      const int oa = side_of[r][e], ob = side_of[r][(e + 1) % len];
+      if (oa * ob >= 0) continue;
+      Point<FT> x = intersect_lines(lines_[line_id], lines_[lid(w, ring, e)]);
+      if constexpr (floating) {
+        const Point<FT>& ea = pt(vid(w, ring, e));
+        const Point<FT>& eb = pt(vid(w, ring, (e + 1) % len));
+        if (!point_finite(x) || !near_box(ea, eb, x, 1e-9 * scale_)) x = intersect_through(cut.q, q2, ea, eb);
+      }
+      if (!point_finite(x)) return fail(broken_, "a constructed point is not finite");
+      proper[r][e] = static_cast<long>(out_.pool.size());
+      proper_t[r][e] = t_of(x);
+      out_.pool.push_back(x);
+    }
+  }
+
+  // ---- each side: crossing list of the line shifted into that side, then the walk
   std::vector<std::vector<Corner1>> pieces;
-  if (!trace_side(+1, line_id, cut.q, q2, xs, order, ring_next, ring_prev, w, pieces)) return false;
-  const std::size_t n_left = pieces.size();
-  if (!trace_side(-1, line_id, cut.q, q2, xs, order, ring_next, ring_prev, w, pieces)) return false;
+  std::size_t n_left = 0;
+  std::vector<int> pierced;
+  for (int sign : {+1, -1}) {
+    std::vector<Crossing> xs;
+    std::vector<std::pair<std::size_t, std::size_t>> groups;  // [begin, end) per crossed ring
+    for (std::size_t r = 0; r < rings.size(); ++r) {
+      const int ring = rings[r];
+      const std::uint32_t len = ring_len(w, ring);
+      const std::size_t begin = xs.size();
+      for (std::uint32_t e = 0; e < len; ++e) {
+        const std::uint32_t en = (e + 1) % len;
+        const int oa = side_of[r][e], ob = side_of[r][en];
+        if (proper[r][e] >= 0) {
+          xs.push_back({proper_t[r][e], static_cast<std::uint32_t>(proper[r][e]), ring, e});
+        } else if (oa == 0 && ob == sign) {
+          const std::uint32_t a = vid(w, ring, e);
+          xs.push_back({t_of(pt(a)), a, ring, e, true, vid(w, ring, en)});
+        } else if (ob == 0 && oa == sign) {
+          const std::uint32_t b = vid(w, ring, en);
+          xs.push_back({t_of(pt(b)), b, ring, e, true, vid(w, ring, e)});
+        }
+      }
+      if (xs.size() > begin) {
+        groups.emplace_back(begin, xs.size());
+        if (ring >= 0 && std::find(pierced.begin(), pierced.end(), ring) == pierced.end()) pierced.push_back(ring);
+      }
+    }
+    const std::size_t m = xs.size();
+    out_.stats.max_crossings = std::max(out_.stats.max_crossings, m);
+    if (m % 2 != 0) return fail(broken_, "odd number of crossings");
+    for (const auto& g : groups)
+      if ((g.second - g.first) % 2 != 0) return fail(broken_, "a ring is crossed an odd number of times");
+
+    std::vector<std::size_t> order(m);
+    for (std::size_t i = 0; i < m; ++i) order[i] = i;
+    std::sort(order.begin(), order.end(), [&](std::size_t a, std::size_t b) {
+      if (xs[a].t != xs[b].t) return xs[a].t < xs[b].t;
+      if (xs[a].v != xs[b].v || !xs[a].contact || !xs[b].contact) return a < b;  // rejected below
+      return shifted_before(sign, pt(xs[a].v), pt(xs[a].far), pt(xs[b].far), cut.d);
+    });
+    for (std::size_t i = 0; i + 1 < m; ++i) {
+      const Crossing& x0 = xs[order[i]];
+      const Crossing& x1 = xs[order[i + 1]];
+      if (x0.t < x1.t) continue;
+      if (!(x0.v == x1.v && x0.contact && x1.contact)) return fail(broken_, "two crossings coincide");
+    }
+    if (m > 0 && (xs[order.front()].ring != -1 || xs[order.back()].ring != -1))
+      return fail(broken_, "the outermost crossings are not on the outer ring");
+
+    std::vector<std::size_t> ring_next(m), ring_prev(m);
+    for (const auto& g : groups)
+      for (std::size_t i = g.first; i < g.second; ++i) {
+        ring_next[i] = i + 1 < g.second ? i + 1 : g.first;
+        ring_prev[i] = i > g.first ? i - 1 : g.second - 1;
+      }
+    if (!trace_side(sign, line_id, cut.q, q2, xs, order, ring_next, ring_prev, w, pieces)) return false;
+    if (sign > 0) n_left = pieces.size();
+  }
+  if (pierced.empty()) return fail(broken_, "a cut pierces no hole");
 
   auto piece_ring = [&](std::size_t c) {
     Ring<FT> r;
@@ -490,12 +715,14 @@ bool HoleEliminator<K>::cut_node(Work& w, std::vector<Work>& stack)
       if (ring_orientation<K>(piece_ring(c)) <= 0)
         return fail(broken_, "a piece is not counter-clockwise");
 
-  // ---- un-pierced holes go to the piece containing them
+  // ---- un-pierced holes (strictly on one side) go to the piece containing them
   std::vector<std::vector<int>> child_holes(pieces.size());
   for (int h : w.holes) {
     if (std::find(pierced.begin(), pierced.end(), h) != pierced.end()) continue;
     const Point<FT>& u = pt(hole_off_[h]);
-    const bool left = K::orient(cut.q, q2, u) > 0;
+    const int o = K::orient(cut.q, q2, u);
+    if (o == 0) return fail(broken_, "an un-pierced hole touches the cut line");
+    const bool left = o > 0;
     const std::size_t lo = left ? 0 : n_left, hi = left ? n_left : pieces.size();
     int owner = -1;
     if (hi - lo == 1 && !opt_.check) {
@@ -514,7 +741,6 @@ bool HoleEliminator<K>::cut_node(Work& w, std::vector<Work>& stack)
 
   // ---- record, then continue depth-first with the pieces in order
   ++out_.stats.cuts;
-  out_.stats.max_crossings = std::max(out_.stats.max_crossings, m);
   out_.stats.fallback_rotated += (cut.fallback == CutFallback::Rotated);
   out_.stats.fallback_midpoint += (cut.fallback == CutFallback::EdgeMidpoint);
   out_.stats.degenerate_directions += cut.degenerate_direction;
@@ -571,10 +797,15 @@ void HoleEliminator<K>::run(PolygonWithHoles<FT> in)
   };
   const std::uint32_t outer_off = add_ring(in.outer);
   for (const Ring<FT>& h : in.holes) {
-    hole_off_.push_back(add_ring(h));
+    const std::uint32_t off = add_ring(h);
+    hole_off_.push_back(off);
     hole_len_.push_back(static_cast<std::uint32_t>(h.size()));
+    std::vector<std::uint32_t> ids(h.size());
+    for (std::uint32_t k = 0; k < h.size(); ++k) ids[k] = off + k;
+    hole_line_.push_back(std::move(ids));
   }
   out_.stats.holes = in.holes.size();
+  out_.stats.symbolic = is_symbolic_kernel<K>::value;
 
   Work root;
   for (std::uint32_t k = 0; k < in.outer.size(); ++k) root.outer.push_back({outer_off + k, outer_off + k});
@@ -608,18 +839,78 @@ void HoleEliminator<K>::run(PolygonWithHoles<FT> in)
   }
 }
 
+/// Runs the eliminator, without the symbolic rerun.
+template <class K>
+HoleElimination<typename K::FT> eliminate_holes_once(PolygonWithHoles<typename K::FT> input,
+                                                     const HoleElimOptions& opt)
+{
+  HoleElimination<typename K::FT> out;
+  HoleEliminator<K>(out, opt).run(std::move(input));
+  return out;
+}
+
+#ifdef PD_HAVE_GMP
+inline PolygonWithHoles<EpsQ> to_symbolic(const PolygonWithHoles<mpq_class>& p)
+{
+  auto ring = [](const Ring<mpq_class>& r) {
+    Ring<EpsQ> out;
+    out.reserve(r.size());
+    for (const auto& v : r) out.push_back({EpsQ(v.x), EpsQ(v.y)});
+    return out;
+  };
+  PolygonWithHoles<EpsQ> out{ring(p.outer), {}};
+  for (const auto& h : p.holes) out.holes.push_back(ring(h));
+  return out;
+}
+
+/// The result of a symbolic run, evaluated at ε = 0.
+inline HoleElimination<mpq_class> symbolic_limit(HoleElimination<EpsQ>&& s)
+{
+  HoleElimination<mpq_class> r;
+  r.pool.reserve(s.pool.size());
+  for (const auto& p : s.pool) r.pool.push_back(limit_point(p));
+  r.leaves = std::move(s.leaves);
+  for (const auto& n : s.tree) {
+    HoleNode<mpq_class> m;
+    m.parent = n.parent;
+    m.children = n.children;
+    m.leaf = n.leaf;
+    m.holes = n.holes;
+    m.has_cut = n.has_cut;
+    m.cut_point = limit_point(n.cut_point);
+    m.cut_dir = limit_point(n.cut_dir);
+    m.fallback = n.fallback;
+    m.pierced = n.pierced;
+    r.tree.push_back(std::move(m));
+  }
+  r.stats = s.stats;
+  r.diag = std::move(s.diag);
+  return r;
+}
+#endif
+
 } // namespace detail
 
-/// Eliminates the holes of a polygon: returns simple, hole-free pieces that
-/// tile it. The input must be a valid complex polygon (see validate); ring
-/// orientations are arbitrary.
+/// Eliminates the holes of a polygon: returns hole-free pieces that tile it.
+/// The input must be a valid complex polygon (see validate); ring orientations
+/// are arbitrary. The pieces are simple and counter-clockwise, except after a
+/// dangling contact (stats.dangles > 0, exact kernel), where a piece may touch
+/// itself at that vertex (it is weakly simple); decompose's convex pieces are
+/// simple in every case.
 template <class K>
 HoleElimination<typename K::FT> eliminate_holes(PolygonWithHoles<typename K::FT> input,
                                                 const HoleElimOptions& opt = {})
 {
-  HoleElimination<typename K::FT> out;
-  detail::HoleEliminator<K>(out, opt).run(std::move(input));
-  return out;
+#ifdef PD_HAVE_GMP
+  if constexpr (std::is_same_v<K, ExactKernel>) {
+    HoleElimination<mpq_class> out = detail::eliminate_holes_once<K>(input, opt);
+    if (!out.needs_symbolic) return out;
+    HoleElimOptions s = opt;
+    s.validate_input = false;  // already validated
+    return detail::symbolic_limit(detail::eliminate_holes_once<SymbolicKernel>(detail::to_symbolic(input), s));
+  }
+#endif
+  return detail::eliminate_holes_once<K>(std::move(input), opt);
 }
 
 } // namespace pd

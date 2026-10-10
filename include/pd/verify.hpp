@@ -19,6 +19,12 @@
 ///
 /// The certificate is exact with ExactKernel. With a double kernel the chain
 /// test needs exact collinearity of rounded points and is only indicative.
+///
+/// With weakly_simple = true, (1) is relaxed to weakly simple rings: a ring may
+/// pass through one point more than once (as a hole-free piece does after a
+/// dangling contact), provided its edges never cross or overlap and its
+/// interior angles at that point are disjoint. Winding numbers are still 1
+/// inside and 0 outside such a ring, so the conclusion is unchanged.
 
 #include <algorithm>
 #include <cmath>
@@ -51,11 +57,64 @@ struct LineKey {
   }
 };
 
+/// True if the direction x - v lies strictly inside the counter-clockwise arc
+/// of directions from u - v to w - v.
+template <class K>
+bool in_open_arc(const Point<typename K::FT>& v, const Point<typename K::FT>& u,
+                 const Point<typename K::FT>& w, const Point<typename K::FT>& x)
+{
+  const int uw = K::orient(v, u, w);
+  if (uw > 0) return K::orient(v, u, x) > 0 && K::orient(v, x, w) > 0;
+  if (uw < 0) return !(K::orient(v, w, x) >= 0 && K::orient(v, x, u) >= 0);
+  return K::orient(v, u, x) > 0;  // u, w opposite: a half-plane
+}
+
+/// Weak simplicity of a counter-clockwise ring without repeated consecutive
+/// vertices: non-adjacent edges may only meet at a common endpoint, without
+/// overlapping, and at a point visited twice the interior angles are disjoint.
+template <class K>
+bool weakly_simple(const Ring<typename K::FT>& r)
+{
+  using FT = typename K::FT;
+  const std::size_t n = r.size();
+  for (const EdgePair& pr : conflicting_edge_pairs<K>(PolygonWithHoles<FT>{r, {}}, true, 0)) {
+    const std::size_t e = static_cast<std::size_t>(pr.first.edge), f = static_cast<std::size_t>(pr.second.edge);
+    const Point<FT>& a = r[e];
+    const Point<FT>& b = r[next_index(e, n)];
+    const Point<FT>& c = r[f];
+    const Point<FT>& d = r[next_index(f, n)];
+    const Point<FT>* shared = nullptr;
+    const Point<FT>*u = nullptr, *w = nullptr;
+    if (a == c) shared = &a, u = &b, w = &d;
+    else if (a == d) shared = &a, u = &b, w = &c;
+    else if (b == c) shared = &b, u = &a, w = &d;
+    else if (b == d) shared = &b, u = &a, w = &c;
+    if (!shared) return false;  // they cross or touch elsewhere
+    if (K::orient(*u, *shared, *w) == 0 && (in_box(*shared, *u, *w) || in_box(*shared, *w, *u)))
+      return false;  // collinear overlap
+  }
+  for (std::size_t i = 0; i < n; ++i)
+    for (std::size_t j = i + 1; j < n; ++j) {
+      if (!(r[i] == r[j])) continue;
+      const Point<FT>& v = r[i];
+      const Point<FT>& ai = r[prev_index(i, n)];
+      const Point<FT>& bi = r[next_index(i, n)];
+      const Point<FT>& aj = r[prev_index(j, n)];
+      const Point<FT>& bj = r[next_index(j, n)];
+      // Interior at an occurrence: the CCW arc from its next to its previous vertex.
+      if (in_open_arc<K>(v, bi, ai, aj) || in_open_arc<K>(v, bi, ai, bj) ||
+          in_open_arc<K>(v, bj, aj, ai) || in_open_arc<K>(v, bj, aj, bi))
+        return false;
+    }
+  return true;
+}
+
 } // namespace detail
 
 template <class K>
 VerifyReport verify_partition(const PolygonWithHoles<typename K::FT>& input,
-                              const std::vector<Ring<typename K::FT>>& pieces, bool require_convex)
+                              const std::vector<Ring<typename K::FT>>& pieces, bool require_convex,
+                              bool weakly_simple = false)
 {
   using FT = typename K::FT;
   VerifyReport rep;
@@ -72,8 +131,9 @@ VerifyReport verify_partition(const PolygonWithHoles<typename K::FT>& input,
     if (r.size() < 3) return fail(name + " has fewer than 3 vertices");
     for (std::size_t i = 0; i < r.size(); ++i)
       if (r[i] == r[next_index(i, r.size())]) return fail(name + " repeats a vertex");
-    if (!conflicting_edge_pairs<K>(PolygonWithHoles<FT>{r, {}}, true, 1).empty())
-      return fail(name + " is not simple");
+    if (weakly_simple ? !detail::weakly_simple<K>(r)
+                      : !conflicting_edge_pairs<K>(PolygonWithHoles<FT>{r, {}}, true, 1).empty())
+      return fail(name + (weakly_simple ? " is not weakly simple" : " is not simple"));
     if (ring_orientation<K>(r) <= 0) return fail(name + " is not counter-clockwise");
     if (require_convex)
       for (std::size_t i = 0; i < r.size(); ++i)

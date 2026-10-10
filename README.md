@@ -9,7 +9,7 @@ A C++17 library that decomposes a polygon with holes into convex pieces, in two 
 
 Both stages run on an exact rational kernel (GMP) or a fast double-precision kernel.
 
-Version 1.0.1. Released under the BSD 3-Clause License (see `LICENSE`); cite it as described in
+Version 1.1.0. Released under the BSD 3-Clause License (see `LICENSE`); cite it as described in
 `CITATION.cff`. Repository: <https://github.com/yinghui/complex_polygon>.
 
 **Documentation:** the user guide (`docs/USER_GUIDE.md`) covers installation, the input class,

@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.1.0 (2026-10-10)
+
+- Hole elimination: cut lines may now pass through vertices and run along edges. Each side's
+  crossings are those of the line shifted infinitesimally into that side, so every contact is
+  classified exactly and the line through the hole centroids is kept; the fallback line is used
+  only when that line has no direction (and, in floating point, for near-contacts within the
+  clearance and for dangling contacts). New statistics: `vertex_contacts`, `edge_contacts`.
+- Dangling contacts (a hole meeting the line in a single vertex): the exact path splits the hole
+  symbolically with c = v + ε d, reruns with the new `SymbolicKernel` (`EpsQ`: rationals with an
+  infinitesimal ε) and evaluates the result at ε = 0. Statistics `dangles`, `symbolic`. The
+  hole-free pieces are then weakly simple; the convex pieces are simple.
+  A convex piece whose area vanishes at ε = 0 is dropped (`stats.vanished`; none occurred in
+  the tests or the paper's runs).
+- `verify_partition` gained a `weakly_simple` mode (for hole-free pieces after a dangling
+  contact); `pd_decompose --stage holes --verify` uses it when needed.
+- Degenerate set: new cases `vertex-contacts`, `edge-contacts`, `dangling-contacts`.
+- Tests for every contact type, the symbolic kernel, and symbolic-vs-exact agreement.
+
 ## 1.0.1 (2026-09-25)
 
 - Fix: `pd_gen --family nearcollinear` failed for some seeds. Nudging a coordinate 0 by one ulp

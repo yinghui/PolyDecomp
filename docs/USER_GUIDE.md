@@ -112,6 +112,7 @@ template on the kernel.
 | Kernel | Coordinates | Decisions | Constructions |
 |---|---|---|---|
 | `pd::ExactKernel` | GMP rationals (`mpq_class`) | exact | exact |
+| `pd::SymbolicKernel` | rationals with an infinitesimal ε (`pd::EpsQ`) | exact | exact |
 | `pd::DoubleKernel` | `double` | exact on stored points | rounded once |
 | `pd::NaiveDoubleKernel` | `double` | plain floating point | rounded |
 
@@ -121,11 +122,18 @@ hold without any general-position assumption. Input doubles are converted exactl
 constructed point is the intersection of two lines through input data, so the size of its
 exact representation is bounded independently of the recursion depth.
 
+**SymbolicKernel** is used automatically, never directly: when an exact run meets a dangling
+contact (see Section 5), `eliminate_holes` and `decompose` redo the input with this kernel and
+evaluate the result at ε = 0 (`stats.symbolic` is set). Its values are rational functions of ε,
+compared as ε → 0+.
+
 **DoubleKernel.** Coordinates are doubles, but every decision about stored points (the side of
 a line a point lies on, and the orderings derived from it) is exact: a floating-point filter
 with a proven error bound, falling back to an exact expansion computation. Each constructed
 point is rounded once. To keep rounded constructions consistent the kernel additionally
-- keeps every cut line at least 1e-9 times the coordinate scale away from every vertex;
+- keeps every cut line at least 1e-9 times the coordinate scale away from every vertex that
+  does not lie exactly on it, and replaces a line with a dangling contact by the fallback line
+  (no symbolic split in floating point);
 - does not split vertices whose turn is below 1e-12 radians (pieces are convex up to that
   angle), because the needle-shaped pieces this would create cannot be represented in double
   precision;
@@ -149,17 +157,35 @@ A node is an outer ring with the input holes it contains. Each cut is a line:
 - two or more holes: through the vertex-average centroids of the two holes whose centroids are
   farthest apart.
 
-If that line passes exactly through a vertex of the node (or has no direction because two
-centroids coincide), it is replaced by a line through a point of one of those holes, namely
-its centroid or, if the centroid is a vertex, the midpoint of the hole's longest edge. The
-replacement's direction is taken in the widest gap between the directions to the vertices. So
-no cut passes through a vertex, and every cut crosses at least one hole. The polygon on each
-side of the line is traced by one walk along the line's crossings and the rings between them.
-Pierced holes become notches of the pieces; the other holes go to the piece that contains them.
+The line may pass through vertices and run along edges (*contacts*). The pieces on each side
+S are traced as if the line were shifted infinitesimally into S: an edge contributes a
+crossing to S's list if the line crosses its interior, or if one endpoint lies on the line and
+the other strictly on S, in which case the crossing point is that endpoint. Hence
+
+- a vertex whose two edges lie on opposite sides is a crossing on both sides;
+- a vertex whose two edges both lie on S is listed twice on S (it splits the material on S when
+  the angle between the edges is not material) and not on the other side;
+- a run of edges on the line contributes its end vertices to the sides of its outer edges.
+
+Each side's list is walked along the line and the rings; pierced holes become notches of the
+pieces, the other holes go to the piece that contains them. `stats.vertex_contacts` and
+`stats.edge_contacts` count the contacts.
+
+A hole that meets the line in a single vertex v and lies otherwise on one side (a *dangling
+contact*) would give a piece that touches itself at v. The exact path then splits that hole
+with the point c = v + ε d on the line (ε an infinitesimal), so that the contact becomes an edge
+on the line, runs both stages on the perturbed polygon, and evaluates the result at ε = 0
+(`stats.dangles`, `stats.symbolic`). The double kernel uses the fallback line instead.
+
+The line is replaced by a fallback only if it has no direction (two centroids coincide, or
+`a == c`): a line through the centroid of one of those holes (or, if that centroid is a vertex,
+the midpoint of the hole's longest edge) in a direction, taken in the widest gap between the
+directions to the vertices, that avoids every vertex. Every cut crosses at least one hole.
 
 With the exact kernel: every cut removes at least one hole, so there are at most `h` cuts for
-`h` holes; the pieces are simple, hole-free and tile the input (their interiors are pairwise
-disjoint and their closures cover it).
+`h` holes; the pieces are hole-free and tile the input (their interiors are pairwise disjoint
+and their closures cover it). They are simple, except after a dangling contact, where a piece
+touches itself at that vertex (it is weakly simple).
 
 ### Convex decomposition
 
@@ -179,12 +205,15 @@ the pieces need not meet edge to edge: a vertex of one piece can lie inside an e
 
 Stage 1 produces simple counter-clockwise pieces, which is exactly Stage 2's input class, so
 the pipeline's output is a set of convex pieces that tile the input polygon with holes.
-Hole-free pieces that are already convex pass through unchanged.
+Hole-free pieces that are already convex pass through unchanged. After a dangling contact both
+stages run on the perturbed (simple) pieces; at ε = 0 no convex piece contains both v and c,
+so the convex pieces are simple in every case.
 
 ### The certificate
 
-`pd::verify_partition(input, pieces, require_convex)` accepts the pieces if and only if every
-piece is simple and counter-clockwise (and convex, if required) and the oriented boundaries of
+`pd::verify_partition(input, pieces, require_convex, weakly_simple = false)` accepts the pieces
+if and only if every piece is simple (weakly simple, if so requested: it may pass through a
+point twice without crossing itself) and counter-clockwise (and convex, if required) and the oriented boundaries of
 the pieces add up exactly, line by line, to the boundary of the input. By the additivity of
 winding numbers this proves that the pieces tile the input. It shares no code with the
 algorithms, allows T-junctions, and runs in O(E log E) for E edges in total. It is exact with
@@ -249,11 +278,11 @@ The readers throw `pd::ParseError` on malformed files; `pd::convert_polygon` thr
 Convex decomposition performs `O(n (n_c + 1))` predicate evaluations for `n` vertices and
 `n_c` reflex vertices, so it is quadratic in the worst case (for example on combs). Hole
 elimination makes at most `h` cuts, each linear in the size of the current piece apart from
-sorting the crossings and assigning the remaining holes. In our benchmarks the exact kernel is
-about 30 to 90 times slower than the double kernel. Indicative figures on one core of a Xeon E5-2667 v3 with
-frequency scaling active: a 2048-vertex star-shaped polygon takes about 10 ms in double
-precision and 0.9 s exactly; a polygon with 256 holes and about 1000 vertices takes about 3 ms
-and 0.24 s.
+sorting the crossings and assigning the remaining holes. In the benchmarks of version 1.1.0 the
+exact kernel is about 10 to 90 times slower than the double kernel (median about 40). Indicative
+figures on one core of a Xeon E5-2667 v3 with frequency scaling active: a 2048-vertex
+star-shaped polygon takes about 10 ms in double precision and 0.9 s exactly; a polygon with 256
+holes and about 1000 vertices takes about 4 ms and 0.22 s.
 
 ## 11. Limitations
 
@@ -267,6 +296,9 @@ and 0.24 s.
   input vertices lie within a few units in the last place of each other.
 - The double kernel's outputs are convex up to 1e-12 radians and can differ structurally from
   the exact outputs on degenerate data (they remain valid tilings).
+- After a dangling contact, the hole-free pieces of `eliminate_holes` (exact) include a weakly
+  simple piece that touches itself at the contact vertex; the pipeline's convex pieces are
+  simple. The double kernel uses a fallback line for dangling contacts.
 
 ## 12. Reproducing the paper's results
 

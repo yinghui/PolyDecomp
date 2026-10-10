@@ -383,6 +383,8 @@ std::vector<std::pair<std::string, PolygonWithHoles<double>>> degenerate_set()
     return Ring<double>{{x0, y0}, {x1, y0}, {x1, y1}, {x0, y1}};
   };
   const Ring<double> c_hole{{1, 1}, {9, 1}, {9, 3}, {3, 3}, {3, 7}, {9, 7}, {9, 9}, {1, 9}};
+  const Ring<double> diamond_l{{-9, 0}, {-8, -1}, {-7, 0}, {-8, 1}};
+  const Ring<double> diamond_r{{7, 0}, {8, -1}, {9, 0}, {8, 1}};
   return {
       {"concentric-squares", {sq(-2, -2, 2, 2), {sq(-0.5, -0.5, 0.5, 0.5)}}},
       {"centroid-is-own-vertex", {sq(-10, -10, 10, 10), {{{0, 3}, {3, -3}, {0, -1}, {-3, -3}}}}},
@@ -390,6 +392,21 @@ std::vector<std::pair<std::string, PolygonWithHoles<double>>> degenerate_set()
       {"equal-centroids", {sq(0, 0, 10, 10), {c_hole, sq(5, 4.5, 6, 5.5)}}},
       {"anchor-equals-centroid", {{{0, 0}, {12, 0}, {0, 12}}, {sq(3, 3, 5, 5)}}},
       {"diagonal-squares", {sq(0, 0, 10, 10), {sq(1, 1, 2, 2), sq(4.5, 4.5, 5.5, 5.5), sq(8, 8, 9, 9)}}},
+      // The cut line y = 0 through the diamonds' centroids (-8, 0) and (8, 0) passes
+      // through vertices of every kind: diamond corners (edges on both sides), the
+      // outer ring's notch (0, 0), a hole tip (3, 0) and a hole's notch (-4.5, 0).
+      {"vertex-contacts",
+       {{{-12, -6}, {12, -6}, {12, 6}, {1, 6}, {0, 0}, {-1, 6}, {-12, 6}},
+        {diamond_l, diamond_r, {{2, -3}, {6, -3}, {6, 1}, {5, 1}, {4, -1}, {3, 0}, {2, -1}},
+         {{-6, -2}, {-3, -2}, {-3, 2}, {-4, 2}, {-4.5, 0}, {-5, 2}, {-6, 2}}}}},
+      // ... and along edges: one with its neighbours on both sides, one on one side.
+      {"edge-contacts",
+       {sq(-12, -6, 12, 6),
+        {diamond_l, diamond_r, {{-5, -2}, {-3, 0}, {-1, 0}, {0, 2}, {-4, 2}}, {{2, 0}, {4, 0}, {5, 2}, {1, 2}}}}},
+      // ... and through single vertices of two triangles that lie otherwise on one
+      // side (dangling contacts: split symbolically by the exact kernel).
+      {"dangling-contacts",
+       {sq(-12, -6, 12, 6), {diamond_l, diamond_r, {{0, 0}, {1, 2}, {-1, 2}}, {{3, 0}, {4, -2}, {2, -2}}}}},
   };
 }
 

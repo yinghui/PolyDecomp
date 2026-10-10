@@ -12,6 +12,7 @@
 #include "pd/verify.hpp"
 #ifdef PD_HAVE_GMP
 #include "pd/kernel/exact.hpp"
+#include "pd/kernel/symbolic.hpp"
 #endif
 
 #ifdef PD_HAVE_GMP
@@ -123,6 +124,26 @@ TEST_CASE("check_pieces_approx rejects the typical rounding failures")
   CHECK_FALSE(pd::check_pieces_approx<DK>(sq, {left, notch}, true, 1e-12, 1e-9).ok);     // not convex
   // Not convex is fine if convexity is not required (the notch loses 2 of 16 in area).
   CHECK(pd::check_pieces_approx<DK>(sq, {left, notch}, false, 1e-12, 0.2).ok);
+}
+
+TEST_CASE("symbolic kernel equals the exact one when nothing is perturbed")
+{
+  // On inputs without dangling contacts every value stays constant, so the
+  // symbolic run must reproduce the exact run exactly.
+  for (pd::gen::Family f : pd::gen::all_families())
+    for (std::uint64_t seed = 1; seed <= 4; ++seed) {
+      CAPTURE(pd::gen::name(f));
+      CAPTURE(seed);
+      const auto in = pd::convert_polygon<EK>(pd::gen::generate(f, seed));
+      const auto a = pd::decompose<EK>(in);
+      REQUIRE(a.ok());
+      if (a.stats.symbolic) continue;
+      const auto s = pd::detail::decompose_once<pd::SymbolicKernel>(pd::detail::to_symbolic(in), {});
+      REQUIRE(s.ok());
+      REQUIRE(s.leaves == a.leaves);
+      REQUIRE(s.pool.size() == a.pool.size());
+      for (std::size_t i = 0; i < a.pool.size(); ++i) CHECK(pd::limit_point(s.pool[i]) == a.pool[i]);
+    }
 }
 
 #endif // PD_HAVE_GMP

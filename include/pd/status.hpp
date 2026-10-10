@@ -42,4 +42,11 @@ struct is_exact_kernel {
   static constexpr bool value = false;
 };
 
+/// True for the symbolic kernel (exact rationals with an infinitesimal ε), the
+/// only kernel that can split a dangling contact. Specialised in kernel/symbolic.hpp.
+template <class K>
+struct is_symbolic_kernel {
+  static constexpr bool value = false;
+};
+
 } // namespace pd

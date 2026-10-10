@@ -20,5 +20,6 @@
 #include "pd/io/leaves.hpp"
 #ifdef PD_HAVE_GMP
 #include "pd/kernel/exact.hpp"
+#include "pd/kernel/symbolic.hpp"
 #include "pd/io/rational.hpp"
 #endif

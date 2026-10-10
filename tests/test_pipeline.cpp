@@ -30,8 +30,9 @@ pd::PipelineResult<EK::FT> certified(const pd::PolygonWithHoles<double>& in)
   REQUIRE_MESSAGE(r.ok(), r.diag.message);
   const auto rep = pd::verify_partition<EK>(e, r.leaf_rings(), /*convex=*/true);
   CHECK_MESSAGE(rep.ok, rep.failure);
-  // Stage 1 output alone is a hole-free partition as well.
-  const auto rep1 = pd::verify_partition<EK>(e, r.hole_free_rings(), false);
+  // Stage 1 output alone is a hole-free partition as well (weakly simple after
+  // a dangling contact).
+  const auto rep1 = pd::verify_partition<EK>(e, r.hole_free_rings(), false, r.stats.holes.dangles > 0);
   CHECK_MESSAGE(rep1.ok, rep1.failure);
   CHECK(r.stats.convex_pieces == r.leaves.size());
   CHECK(r.stats.convex_pieces <= r.stats.reflex_vertices + r.stats.hole_free_pieces);
@@ -57,6 +58,22 @@ TEST_CASE("pipeline on the degenerate set")
   for (const auto& d : pd::gen::degenerate_set()) {
     CAPTURE(d.first);
     certified(d.second);
+  }
+}
+
+TEST_CASE("pipeline after dangling contacts: convex pieces strictly simple")
+{
+  for (const auto& d : pd::gen::degenerate_set()) {
+    if (d.first != "dangling-contacts") continue;
+    const auto r = certified(d.second);  // strict certificate for the convex pieces
+    CHECK(r.stats.symbolic);
+    CHECK(r.stats.holes.dangles == 2);
+    // Exact count of Theorem 2 still holds after the limit.
+    CHECK(r.stats.convex_pieces ==
+          r.stats.reflex_vertices + r.stats.hole_free_pieces - r.stats.double_resolutions);
+    // The double pipeline falls back instead and must agree in validity.
+    const auto dr = pd::decompose<pd::DoubleKernel>(d.second);
+    CHECK_MESSAGE(dr.ok(), dr.diag.message);
   }
 }
 

@@ -6,6 +6,7 @@
 #include <random>
 #include <string>
 
+#include "pd/generate.hpp"
 #include "pd/hole_elim.hpp"
 #include "pd/io/obj.hpp"
 #include "pd/kernel/double.hpp"
@@ -90,12 +91,14 @@ pd::HoleElimination<EK::FT> run_exact(const pd::PolygonWithHoles<double>& in)
   return pd::eliminate_holes<EK>(pd::convert_polygon<EK>(in), opt);
 }
 
-// Runs the exact elimination and certifies the result.
+// Runs the exact elimination and certifies the result (weakly simple pieces are
+// allowed only after a dangling contact).
 pd::HoleElimination<EK::FT> run_certified(const pd::PolygonWithHoles<double>& in)
 {
   auto r = run_exact(in);
   REQUIRE_MESSAGE(r.ok(), r.diag.message);
-  const auto rep = pd::verify_partition<EK>(pd::convert_polygon<EK>(in), r.leaf_rings(), false);
+  const auto rep =
+      pd::verify_partition<EK>(pd::convert_polygon<EK>(in), r.leaf_rings(), false, r.stats.dangles > 0);
   CHECK_MESSAGE(rep.ok, rep.failure);
   CHECK(r.stats.cuts <= in.holes.size());
   return r;
@@ -119,10 +122,12 @@ TEST_CASE("one square hole")
 
 TEST_CASE("concentric square-in-square (segfaulted the old code)")
 {
-  // The preferred line runs along a diagonal through four corners.
+  // The preferred line runs along a diagonal through four corners, each with its
+  // edges on both sides: it is used as it is.
   const auto r = run_certified({square(-2, -2, 2, 2), {square(-0.5, -0.5, 0.5, 0.5)}});
   CHECK(r.stats.cuts == 1);
-  CHECK(r.stats.fallback_rotated == 1);
+  CHECK(r.stats.fallback_rotated == 0);
+  CHECK(r.stats.vertex_contacts == 4);
   CHECK(r.leaves.size() == 2);
 }
 
@@ -131,7 +136,8 @@ TEST_CASE("a hole whose centroid is one of its own vertices")
   // Arrowhead with vertex average (0, -1) = its reflex vertex.
   const auto dart = R({{0, 3}, {3, -3}, {0, -1}, {-3, -3}});
   const auto r = run_certified({square(-10, -10, 10, 10), {dart}});
-  CHECK(r.stats.fallback_midpoint == 1);
+  CHECK(r.stats.fallback_midpoint == 0);
+  CHECK(r.stats.vertex_contacts >= 1);
 }
 
 TEST_CASE("a hole centroid on another hole's vertex (entangled holes)")
@@ -141,7 +147,55 @@ TEST_CASE("a hole centroid on another hole's vertex (entangled holes)")
   const auto c_hole = R({{1, 1}, {9, 1}, {9, 3}, {3, 3}, {3, 7}, {9, 7}, {9, 9}, {1, 9}});
   const auto tri = R({{5.5, 5}, {8, 4}, {8, 6}});
   const auto r = run_certified({square(0, 0, 10, 10), {c_hole, tri}});
-  CHECK(r.stats.fallback_midpoint >= 1);
+  CHECK(r.stats.fallback_midpoint == 0);
+  CHECK(r.stats.vertex_contacts >= 1);
+}
+
+pd::PolygonWithHoles<double> degenerate(const std::string& name)
+{
+  for (const auto& d : pd::gen::degenerate_set())
+    if (d.first == name) return d.second;
+  FAIL("no degenerate case " << name);
+  return {};
+}
+
+TEST_CASE("a cut line through vertices of every kind")
+{
+  const auto r = run_certified(degenerate("vertex-contacts"));
+  CHECK(r.stats.cuts == 1);  // the line y = 0 crosses all four holes
+  CHECK(r.stats.vertex_contacts == 7);
+  CHECK(r.stats.edge_contacts == 0);
+  CHECK(r.stats.fallback_rotated + r.stats.fallback_midpoint == 0);
+  CHECK(r.leaves.size() == 4);
+}
+
+TEST_CASE("a cut line along edges")
+{
+  const auto r = run_certified(degenerate("edge-contacts"));
+  CHECK(r.stats.cuts == 1);
+  CHECK(r.stats.edge_contacts == 2);
+  CHECK(r.stats.fallback_rotated + r.stats.fallback_midpoint == 0);
+  CHECK(r.leaves.size() == 2);
+}
+
+TEST_CASE("dangling contacts are split symbolically")
+{
+  const auto in = degenerate("dangling-contacts");
+  const auto r = run_certified(in);  // weakly simple
+  CHECK(r.stats.symbolic);
+  CHECK(r.stats.dangles == 2);
+  CHECK(r.stats.cuts == 1);
+  CHECK(r.stats.fallback_rotated + r.stats.fallback_midpoint == 0);
+  // The pieces touch themselves at the dangling vertices: not strictly simple.
+  CHECK_FALSE(pd::verify_partition<EK>(pd::convert_polygon<EK>(in), r.leaf_rings(), false).ok);
+}
+
+TEST_CASE("the double kernel falls back for dangling contacts")
+{
+  const auto r = pd::eliminate_holes<pd::DoubleKernel>(degenerate("dangling-contacts"));
+  REQUIRE_MESSAGE(r.ok(), r.diag.message);
+  CHECK(r.stats.dangles == 0);
+  CHECK(r.stats.fallback_rotated + r.stats.fallback_midpoint >= 1);
 }
 
 TEST_CASE("two holes with the same centroid")

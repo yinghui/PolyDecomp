@@ -6,6 +6,10 @@
 /// eliminate_holes) -> convex pieces (Stage 2, convex_decompose on each piece).
 /// Stage 1 emits simple counter-clockwise pieces, exactly the input class of
 /// Stage 2, so the stages compose; pieces that are already convex pass through.
+/// After a dangling contact (exact kernel) both stages run with the symbolic
+/// kernel on the perturbed pieces, which are simple, and the result is
+/// evaluated at ε = 0: the convex pieces are then still simple and tile the
+/// input, while the hole-free piece at the contact touches itself at a vertex.
 
 #include <algorithm>
 #include <cstdint>
@@ -50,6 +54,8 @@ struct PipelineStats {
   std::size_t double_resolutions = 0;
   std::size_t convex_pieces = 0;
   bool retried_exact = false;         ///< the result comes from an exact rerun
+  bool symbolic = false;              ///< computed with the symbolic kernel, evaluated at ε = 0
+  std::size_t vanished = 0;           ///< symbolic run: convex pieces of zero area at ε = 0, dropped
 };
 
 template <class FT>
@@ -61,6 +67,7 @@ struct PipelineResult {
   std::vector<HoleNode<FT>> hole_tree;                ///< Stage 1 tree (if kept)
   PipelineStats stats;
   Diagnostics diag;
+  bool needs_symbolic = false;  ///< internal: an exact run met a dangling contact
 
   bool ok() const { return diag.status == Status::Ok; }
   Ring<FT> ring_of(const std::vector<std::uint32_t>& ids) const
@@ -99,10 +106,12 @@ PipelineResult<typename K::FT> decompose_once(PolygonWithHoles<typename K::FT> i
   s1.check = opt.check;
   s1.keep_tree = opt.keep_tree;
   const PolygonWithHoles<FT> original = input;
-  HoleElimination<FT> h = eliminate_holes<K>(std::move(input), s1);
+  HoleElimination<FT> h = eliminate_holes_once<K>(std::move(input), s1);
   out.stats.holes = h.stats;
+  out.stats.symbolic = h.stats.symbolic;
   if (!h.ok()) {
     out.diag = std::move(h.diag);
+    out.needs_symbolic = h.needs_symbolic;
     return out;
   }
   out.pool = std::move(h.pool);
@@ -163,6 +172,55 @@ PipelineResult<typename K::FT> decompose_once(PolygonWithHoles<typename K::FT> i
   return out;
 }
 
+#ifdef PD_HAVE_GMP
+/// Exact pipeline: ExactKernel, and the symbolic kernel if a dangling contact
+/// occurs, evaluated at ε = 0. Repeated consecutive points are dropped, and so
+/// is a convex piece whose area vanishes at ε = 0 (it covers no area, so the
+/// others still tile the input; stats.vanished counts them).
+inline PipelineResult<mpq_class> decompose_exact(const PolygonWithHoles<mpq_class>& input,
+                                                 const PipelineOptions& opt)
+{
+  PipelineResult<mpq_class> out = decompose_once<ExactKernel>(input, opt);
+  if (!out.needs_symbolic) return out;
+  PipelineOptions so = opt;
+  so.validate_input = false;  // already validated
+  PipelineResult<EpsQ> s = decompose_once<SymbolicKernel>(to_symbolic(input), so);
+  PipelineResult<mpq_class> r;
+  r.pool.reserve(s.pool.size());
+  for (const auto& p : s.pool) r.pool.push_back(limit_point(p));
+  r.hole_free = std::move(s.hole_free);
+  r.stats = s.stats;
+  r.diag = std::move(s.diag);
+  for (const auto& n : s.hole_tree) {
+    HoleNode<mpq_class> m;
+    m.parent = n.parent;
+    m.children = n.children;
+    m.leaf = n.leaf;
+    m.holes = n.holes;
+    m.has_cut = n.has_cut;
+    m.cut_point = limit_point(n.cut_point);
+    m.cut_dir = limit_point(n.cut_dir);
+    m.fallback = n.fallback;
+    m.pierced = n.pierced;
+    r.hole_tree.push_back(std::move(m));
+  }
+  for (std::size_t k = 0; k < s.leaves.size(); ++k) {
+    std::vector<std::uint32_t> g;
+    for (std::uint32_t id : s.leaves[k])
+      if (g.empty() || !(r.pool[g.back()] == r.pool[id])) g.push_back(id);
+    while (g.size() > 1 && r.pool[g.back()] == r.pool[g.front()]) g.pop_back();
+    if (g.size() < 3 || signed_area2(r.ring_of(g)) <= 0) {
+      ++r.stats.vanished;
+      continue;
+    }
+    r.leaves.push_back(std::move(g));
+    r.leaf_source.push_back(s.leaf_source[k]);
+  }
+  r.stats.convex_pieces = r.leaves.size();
+  return r;
+}
+#endif
+
 } // namespace detail
 
 /// Decomposes a polygon with holes into convex pieces. With a floating-point
@@ -174,12 +232,15 @@ PipelineResult<typename K::FT> decompose(PolygonWithHoles<typename K::FT> input,
                                          const PipelineOptions& opt = {})
 {
   using FT = typename K::FT;
+#ifdef PD_HAVE_GMP
+  if constexpr (std::is_same_v<K, ExactKernel>) return detail::decompose_exact(input, opt);
+#endif
   if constexpr (!is_exact_kernel<K>::value && std::is_same_v<FT, double>) {
 #ifdef PD_HAVE_GMP
     if (opt.on_failure == OnFailure::RetryExact) {
       PipelineResult<FT> out = detail::decompose_once<K>(input, opt);
       if (out.diag.status != Status::NumericalFailure) return out;
-      PipelineResult<mpq_class> ex = detail::decompose_once<ExactKernel>(convert_polygon<ExactKernel>(input), opt);
+      PipelineResult<mpq_class> ex = detail::decompose_exact(convert_polygon<ExactKernel>(input), opt);
       PipelineResult<FT> r;
       r.pool.reserve(ex.pool.size());
       for (const auto& p : ex.pool) r.pool.push_back({p.x.get_d(), p.y.get_d()});

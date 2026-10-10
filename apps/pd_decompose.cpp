@@ -124,10 +124,15 @@ Outcome run(const pd::PolygonWithHoles<double>& in, const Config& cfg)
                 {"vertex_hits", s.vertex_hits},
                 {"double_resolutions", s.double_resolutions},
                 {"convex_pieces", s.convex_pieces},
+                {"vertex_contacts", s.holes.vertex_contacts},
+                {"edge_contacts", s.holes.edge_contacts},
+                {"dangles", s.holes.dangles},
                 {"fallback_rotated", s.holes.fallback_rotated},
                 {"fallback_midpoint", s.holes.fallback_midpoint},
                 {"max_depth_holes", s.holes.max_depth},
-                {"retried_exact", s.retried_exact ? 1u : 0u}};
+                {"retried_exact", s.retried_exact ? 1u : 0u},
+                {"symbolic", s.symbolic ? 1u : 0u},
+                {"vanished", s.vanished}};
   } else if (cfg.stage == Stage::Holes) {
     pd::HoleElimOptions opt;
     opt.check = cfg.check;
@@ -139,10 +144,14 @@ Outcome run(const pd::PolygonWithHoles<double>& in, const Config& cfg)
     o.counts = {{"cuts", s.cuts},
                 {"hole_free_pieces", hr.leaves.size()},
                 {"max_crossings", s.max_crossings},
+                {"vertex_contacts", s.vertex_contacts},
+                {"edge_contacts", s.edge_contacts},
+                {"dangles", s.dangles},
                 {"fallback_rotated", s.fallback_rotated},
                 {"fallback_midpoint", s.fallback_midpoint},
                 {"degenerate_directions", s.degenerate_directions},
-                {"max_depth", s.max_depth}};
+                {"max_depth", s.max_depth},
+                {"symbolic", s.symbolic ? 1u : 0u}};
   } else {
     if (!in.holes.empty()) {
       o.status = pd::Status::InvalidInput;
@@ -183,8 +192,10 @@ Outcome run(const pd::PolygonWithHoles<double>& in, const Config& cfg)
     if constexpr (pd::is_exact_kernel<K>::value) exact_pieces = pieces;
     else
       for (const auto& r : o.pieces) exact_pieces.push_back(pd::convert_ring<EK>(r));
+    // Hole-free pieces may be weakly simple after a dangling contact.
     const pd::VerifyReport rep = pd::verify_partition<EK>(pd::convert_polygon<EK>(in), exact_pieces,
-                                                          cfg.stage != Stage::Holes);
+                                                          cfg.stage != Stage::Holes,
+                                                          cfg.stage == Stage::Holes && hr.stats.dangles > 0);
     o.verified = rep.ok ? 1 : 0;
     o.verify_failure = rep.failure;
   }

@@ -13,6 +13,7 @@ add_executable(pd_tests
   test_generate.cpp
   test_pipeline.cpp
   test_differential.cpp
+  test_symbolic.cpp
 )
 target_link_libraries(pd_tests PRIVATE pd::polydecomp pd_doctest_main)
 target_compile_definitions(pd_tests PRIVATE PD_DATA_DIR="${PROJECT_SOURCE_DIR}/data")

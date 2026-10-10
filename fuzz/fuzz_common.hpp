@@ -34,7 +34,7 @@ inline void check_polygon(const pd::PolygonWithHoles<double>& p)
   if (!r.ok()) bug("exact pipeline failed on a valid input", r.diag.message);
   const auto cert = pd::verify_partition<EK>(e, r.leaf_rings(), true);
   if (!cert.ok) bug("exact result not certified", cert.failure);
-  const auto cert1 = pd::verify_partition<EK>(e, r.hole_free_rings(), false);
+  const auto cert1 = pd::verify_partition<EK>(e, r.hole_free_rings(), false, r.stats.holes.dangles > 0);
   if (!cert1.ok) bug("hole-free pieces not certified", cert1.failure);
 
   pd::PipelineOptions opt;
