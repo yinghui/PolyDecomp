@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.1.1 (2026-10-11)
+
+- Degenerate set: new case `ring-edge-contacts` (edges of the outer ring on the cut line, a wing
+  and a wedge), with a test.
+
 ## 1.1.0 (2026-10-10)
 
 - Hole elimination: cut lines may now pass through vertices and run along edges. Each side's

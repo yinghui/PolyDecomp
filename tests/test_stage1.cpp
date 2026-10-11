@@ -178,6 +178,17 @@ TEST_CASE("a cut line along edges")
   CHECK(r.leaves.size() == 2);
 }
 
+TEST_CASE("a cut line along edges of the outer ring")
+{
+  // A wing (a step of the outer ring) and a wedge (the bottom of a slot) on the line y = 0.
+  const auto r = run_certified(degenerate("ring-edge-contacts"));
+  CHECK(r.stats.cuts == 1);
+  CHECK(r.stats.edge_contacts == 2);
+  CHECK(r.stats.vertex_contacts == 4);
+  CHECK(r.stats.fallback_rotated + r.stats.fallback_midpoint == 0);
+  CHECK(r.leaves.size() == 3);  // above: left and right of the slot; below: one piece
+}
+
 TEST_CASE("dangling contacts are split symbolically")
 {
   const auto in = degenerate("dangling-contacts");

@@ -403,6 +403,11 @@ std::vector<std::pair<std::string, PolygonWithHoles<double>>> degenerate_set()
       {"edge-contacts",
        {sq(-12, -6, 12, 6),
         {diamond_l, diamond_r, {{-5, -2}, {-3, 0}, {-1, 0}, {0, 2}, {-4, 2}}, {{2, 0}, {4, 0}, {5, 2}, {1, 2}}}}},
+      // ... and along edges of the outer ring: a step (-12,0)-(-10,0), its neighbours on both
+      // sides (a wing), and the bottom (1,0)-(3,0) of a slot, its neighbours on one side (a wedge).
+      {"ring-edge-contacts",
+       {{{-10, -6}, {12, -6}, {12, 6}, {3, 6}, {3, 0}, {1, 0}, {1, 6}, {-12, 6}, {-12, 0}, {-10, 0}},
+        {diamond_l, diamond_r}}},
       // ... and through single vertices of two triangles that lie otherwise on one
       // side (dangling contacts: split symbolically by the exact kernel).
       {"dangling-contacts",
