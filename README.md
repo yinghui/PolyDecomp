@@ -9,7 +9,7 @@ A C++17 library that decomposes a polygon with holes into convex pieces, in two 
 
 Both stages run on an exact rational kernel (GMP) or a fast double-precision kernel.
 
-Version 1.1.1. Released under the BSD 3-Clause License (see `LICENSE`); cite it as described in
+Version 1.1.2. Released under the BSD 3-Clause License (see `LICENSE`); cite it as described in
 `CITATION.cff`. Repository: <https://github.com/yinghui/complex_polygon>.
 
 **Documentation:** the user guide (`docs/USER_GUIDE.md`) covers installation, the input class,
@@ -59,3 +59,5 @@ development files are missing. Either install them (e.g. `libstdc++-14-dev`) or 
 ## Third-party code
 
 - `tests/third_party/doctest.h`: doctest 2.4.9 (MIT license), used only by the test suite.
+- `third_party/polypartition/`: PolyPartition by Ivan Fratrić, commit `b000a4a` (MIT license),
+  compiled only into `pd_bench` as a baseline. Not part of the library and not installed.

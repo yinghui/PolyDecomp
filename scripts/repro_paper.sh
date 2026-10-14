@@ -10,7 +10,7 @@
 #   7. double kernel with OnFailure::RetryExact on the census inputs  (RETRY.txt)
 #   8. unit-test case count                                          (TESTS.txt)
 #      and the hand-made degenerate set, exact + certificate         (DEGENERATE.txt)
-#   9. benchmarks against CGAL                                       (BENCH.csv, BENCH.md)
+#   9. benchmarks against CGAL and PolyPartition                     (BENCH.csv, BENCH.md)
 # Needs: GMP, CGAL (libcgal-dev), and the oracle venv (scripts/oracle/setup_venv.sh).
 # Timings depend on the machine; the script records its CPU and frequency policy.
 set -euo pipefail

@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.1.2 (2026-10-14)
+
+Benchmark harness only; the library is unchanged.
+
+- `pd_bench`: two Hertel and Mehlhorn baselines that accept holes. `polypartition-hm` is
+  PolyPartition's `ConvexPartition_HM` (holes bridged, ear clipping, merge; double precision),
+  vendored unmodified in `third_party/polypartition/` (MIT). `cgal-cdt-hm` merges the triangles of
+  CGAL's constrained triangulation, removing every diagonal whose endpoints stay convex (CGAL's
+  exact orientation test).
+- `pd_bench`: new CSV column `certified`. After timing, one untimed run of every method whose
+  pieces use only input vertices (`ours-exact`, `polypartition-hm`, `cgal-hertel-mehlhorn`,
+  `cgal-greene-approx`, `cgal-optimal`, `cgal-cdt`, `cgal-cdt-hm`) is checked by the exact
+  certificate with convexity required.
+
 ## 1.1.1 (2026-10-11)
 
 - Degenerate set: new case `ring-edge-contacts` (edges of the outer ring on the cut line, a wing

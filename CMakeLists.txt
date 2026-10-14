@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(polydecomp VERSION 1.1.1 LANGUAGES CXX)
+project(polydecomp VERSION 1.1.2 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -45,10 +45,14 @@ foreach(app pd_validate pd_gen pd_decompose)
   pd_set_warnings(${app})
 endforeach()
 
-# pd_bench: our methods always, CGAL baselines with PD_WITH_CGAL (needs GMP).
+# pd_bench: our methods and the vendored PolyPartition baseline always, CGAL
+# baselines with PD_WITH_CGAL (needs GMP). PolyPartition (MIT, third_party/) is
+# compiled only into pd_bench and is not installed.
 if(PD_WITH_GMP)
+  add_library(pd_polypartition STATIC third_party/polypartition/polypartition.cpp)
+  target_include_directories(pd_polypartition SYSTEM PUBLIC third_party/polypartition)
   add_executable(pd_bench apps/pd_bench.cpp)
-  target_link_libraries(pd_bench PRIVATE pd::polydecomp)
+  target_link_libraries(pd_bench PRIVATE pd::polydecomp pd_polypartition)
   target_compile_definitions(pd_bench PRIVATE PD_DATA_DIR="${PROJECT_SOURCE_DIR}/data")
   pd_set_warnings(pd_bench)
   if(PD_WITH_CGAL)

@@ -270,8 +270,10 @@ The readers throw `pd::ParseError` on malformed files; `pd::convert_polygon` thr
 - `pd_gen`: seeded test inputs (families `row`, `star`, `c`, `cluster`, `grid`, and the
   numerically adversarial `nearcollinear`, `neartouch`, `snapped`; combs; degenerate cases).
   The same family and seed give the same polygon on every platform.
-- `pd_bench`: piece counts and timings, with CGAL's decompositions as baselines when built with
-  `PD_WITH_CGAL`.
+- `pd_bench`: piece counts and timings, with PolyPartition's Hertel and Mehlhorn partition
+  (vendored) and, when built with `PD_WITH_CGAL`, CGAL's decompositions and a Hertel and Mehlhorn
+  merge of CGAL's constrained triangulation as baselines. Results whose pieces use only input
+  vertices are checked by the exact certificate (column `certified`).
 
 ## 10. Performance
 
