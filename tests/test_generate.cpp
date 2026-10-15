@@ -77,6 +77,22 @@ TEST_CASE("star polygons and spiral holes are valid and deterministic")
   CHECK(wkt(sp) == wkt(pd::gen::spiral_holes(40, 3)));
 }
 
+TEST_CASE("random holes are valid and deterministic")
+{
+  for (int h : {1, 2, 7, 100})
+    for (std::uint64_t s = 1; s <= 3; ++s) {
+      const auto p = pd::gen::random_holes(h, s);
+      CHECK(p.holes.size() == static_cast<std::size_t>(h));
+      for (const auto& r : p.holes) {
+        CHECK(r.size() >= 3);
+        CHECK(r.size() <= 10);
+      }
+      CHECK(pd::validate<pd::DoubleKernel>(p).ok());
+      CHECK(wkt(p) == wkt(pd::gen::random_holes(h, s)));
+    }
+  CHECK_THROWS(pd::gen::random_holes(0, 1));
+}
+
 TEST_CASE("adversarial families generate every census seed")
 {
   // Regression: nudging a coordinate 0 by one ulp gave a subnormal, which the

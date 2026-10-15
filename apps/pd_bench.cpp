@@ -4,18 +4,27 @@
 // Hertel-Mehlhorn partition, and of CGAL's convex decompositions when built
 // with PD_WITH_CGAL.
 //
-//   pd_bench [--suite simple|holes|all] [--repeats R] [--csv FILE] [--quick]
+//   pd_bench [--suite simple|holes|all|scale] [--repeats R] [--csv FILE] [--quick]
+//            [--budget-ms T]
 //
 // Every (input, method) pair gives one CSV row:
 //   suite,input,n,holes,reflex,lower_bound,method,status,pieces,median_ms,certified
 // n counts all vertices, reflex the reflex vertices of the outer ring and holes
 // (for simple polygons lower_bound is Chazelle's ceil(r/2) + 1, otherwise 0).
-// Times are medians of R runs after one warm-up run. After timing, one more
-// untimed run is checked by the exact certificate (verify_partition with
-// convexity required) where this is possible: certified is 1 if it passes, 0 if
-// it fails, and empty for methods whose pieces contain rounded constructed
-// points (ours-double, cgal-bisector, cgal-vertical) or are not convex
-// (ours-holes-exact). Baseline pieces are made counterclockwise first.
+// Times are medians of R runs after one untimed run. That untimed run is checked
+// by the exact certificate (verify_partition with convexity required) where this
+// is possible: certified is 1 if it passes, 0 if it fails, and empty for methods
+// whose pieces contain rounded constructed points (ours-double, cgal-bisector,
+// cgal-vertical) or are not convex (ours-holes-exact). Baseline pieces are made
+// counterclockwise first.
+//
+// The scale suite (not part of "all") runs random star polygons and combs with
+// 2^10 to 2^16 vertices and random_holes with 2^4 to 2^14 holes, in increasing
+// size. Within each of these three series a method is run on the next size only
+// while its median time stays at most T ms (default 5000); larger sizes of a
+// method that exceeded it get no row. The scale suite also times input
+// validation, which decompose() performs by default: validate-double and
+// validate-exact (pieces 0).
 //
 // Methods: ours-exact / ours-double (the full pipeline, exact or double
 // arithmetic; the double run retries exactly on a numerical failure),
@@ -38,6 +47,7 @@
 #include <iostream>
 #include <list>
 #include <map>
+#include <set>
 #include <string>
 #include <stdexcept>
 #include <unordered_map>
@@ -70,6 +80,7 @@ namespace {
 struct Input {
   std::string suite, name;
   pd::PolygonWithHoles<double> poly;
+  std::string series = {};  ///< scale suite: star, comb or holes (sizes increase within a series)
 };
 
 struct Result {
@@ -82,9 +93,9 @@ struct Result {
 /// sets Result::certified where its pieces can be checked exactly.
 using Method = std::pair<std::string, std::function<Result(const pd::PolygonWithHoles<double>&, bool)>>;
 
+/// Median of `repeats` timed runs (the caller makes the untimed first run).
 double median_ms(int repeats, const std::function<void()>& f)
 {
-  f();  // warm-up
   std::vector<double> t;
   for (int r = 0; r < repeats; ++r) {
     const auto t0 = std::chrono::steady_clock::now();
@@ -233,56 +244,67 @@ Method partition_method(const char* name, F partition)
 
 /// Hertel and Mehlhorn's merge on a triangulation whose vertices are input
 /// points. Every diagonal (an edge shared by two pieces) is removed, in the order
-/// in which it is found, if both of its endpoints stay convex (a straight angle
-/// counts as convex); the test is CGAL's exact orientation on the stored doubles.
+/// in which it is found (by triangle, then by edge), if both of its endpoints stay
+/// convex (a straight angle counts as convex); the test is CGAL's exact orientation
+/// on the stored doubles. The pieces are kept as linked half-edges, so each removal
+/// takes constant time and the merge is linear after the triangulation.
 std::vector<std::vector<std::size_t>> hertel_mehlhorn(const std::vector<Epick::Point_2>& pts,
-                                                      std::vector<std::vector<std::size_t>> poly)
+                                                      const std::vector<std::vector<std::size_t>>& tris)
 {
+  std::vector<std::size_t> origin, next, prev, piece;  // per half-edge
+  std::unordered_map<std::uint64_t, std::size_t> edge;  // directed edge (u, v) -> half-edge
   const auto key = [&pts](std::size_t u, std::size_t v) { return static_cast<std::uint64_t>(u) * pts.size() + v; };
-  std::unordered_map<std::uint64_t, std::size_t> owner;  // directed edge -> piece that has it
-  for (std::size_t k = 0; k < poly.size(); ++k)
-    for (std::size_t i = 0; i < poly[k].size(); ++i) owner[key(poly[k][i], poly[k][(i + 1) % poly[k].size()])] = k;
-  std::vector<std::pair<std::size_t, std::size_t>> diagonals;
-  for (const auto& piece : poly)
-    for (std::size_t i = 0; i < piece.size(); ++i) {
-      const std::size_t u = piece[i], v = piece[(i + 1) % piece.size()];
-      if (u < v && owner.count(key(v, u))) diagonals.push_back({u, v});
+  for (std::size_t k = 0; k < tris.size(); ++k) {
+    const std::size_t base = origin.size(), m = tris[k].size();
+    for (std::size_t i = 0; i < m; ++i) {
+      origin.push_back(tris[k][i]);
+      next.push_back(base + (i + 1) % m);
+      prev.push_back(base + (i + m - 1) % m);
+      piece.push_back(k);
+      edge[key(tris[k][i], tris[k][(i + 1) % m])] = base + i;
     }
-  std::vector<std::size_t> parent(poly.size());
+  }
+  const auto head = [&](std::size_t e) { return origin[next[e]]; };
+  std::vector<std::pair<std::size_t, std::size_t>> diagonals;  // (u -> v, v -> u) with u < v
+  for (std::size_t e = 0; e < origin.size(); ++e) {
+    const auto twin = edge.find(key(head(e), origin[e]));
+    if (origin[e] < head(e) && twin != edge.end()) diagonals.push_back({e, twin->second});
+  }
+  std::vector<std::size_t> parent(tris.size());
   for (std::size_t k = 0; k < parent.size(); ++k) parent[k] = k;
   const auto find = [&parent](std::size_t k) {
     while (parent[k] != k) k = parent[k] = parent[parent[k]];
     return k;
   };
-  // Rotates a piece so that it starts with the directed edge (s, t).
-  const auto starting_with = [](std::vector<std::size_t> r, std::size_t s, std::size_t t) {
-    for (std::size_t i = 0; i < r.size(); ++i)
-      if (r[i] == s && r[(i + 1) % r.size()] == t) {
-        std::rotate(r.begin(), r.begin() + static_cast<std::ptrdiff_t>(i), r.end());
-        return r;
-      }
-    throw std::logic_error("hertel_mehlhorn: edge not found");
-  };
-  for (const auto& [u, v] : diagonals) {
-    const std::size_t a = find(owner.at(key(u, v))), b = find(owner.at(key(v, u)));
+  std::vector<char> removed(origin.size(), 0);
+  for (const auto& [e, t] : diagonals) {  // e = u -> v in piece A, t = v -> u in piece B
+    const std::size_t a = find(piece[e]), b = find(piece[t]);
     if (a == b) continue;
-    const std::vector<std::size_t> A = starting_with(poly[a], u, v);  // u, v, a1, ..., ak
-    const std::vector<std::size_t> B = starting_with(poly[b], v, u);  // v, u, b1, ..., bm
-    // Merged: u, b1, ..., bm, v, a1, ..., ak. New angles at u (ak, u, b1) and v (bm, v, a1).
-    if (CGAL::orientation(pts[A.back()], pts[u], pts[B[2]]) == CGAL::RIGHT_TURN ||
-        CGAL::orientation(pts[B.back()], pts[v], pts[A[2]]) == CGAL::RIGHT_TURN)
+    const std::size_t u = origin[e], v = origin[t];
+    // Merged angles: at u between the vertex before u in A and the one after u in B,
+    // at v between the vertex before v in B and the one after v in A.
+    if (CGAL::orientation(pts[origin[prev[e]]], pts[u], pts[head(next[t])]) == CGAL::RIGHT_TURN ||
+        CGAL::orientation(pts[origin[prev[t]]], pts[v], pts[head(next[e])]) == CGAL::RIGHT_TURN)
       continue;
-    std::vector<std::size_t> merged{u};
-    merged.insert(merged.end(), B.begin() + 2, B.end());
-    merged.push_back(v);
-    merged.insert(merged.end(), A.begin() + 2, A.end());
-    poly[a] = std::move(merged);
-    poly[b].clear();
+    const std::size_t pe = prev[e], ne = next[e], pt = prev[t], nt = next[t];
+    next[pe] = nt;
+    prev[nt] = pe;
+    next[pt] = ne;
+    prev[ne] = pt;
+    removed[e] = removed[t] = 1;
     parent[b] = a;
   }
   std::vector<std::vector<std::size_t>> out;
-  for (auto& piece : poly)
-    if (!piece.empty()) out.push_back(std::move(piece));
+  std::vector<char> seen(origin.size(), 0);
+  for (std::size_t e = 0; e < origin.size(); ++e) {
+    if (removed[e] || seen[e]) continue;
+    std::vector<std::size_t> ring;
+    for (std::size_t f = e; !seen[f]; f = next[f]) {
+      seen[f] = 1;
+      ring.push_back(origin[f]);
+    }
+    out.push_back(std::move(ring));
+  }
   return out;
 }
 
@@ -340,7 +362,7 @@ std::vector<Method> cgal_methods(bool simple, std::size_t n)
                    }
                    pieces.push_back(std::move(piece));
                  }
-                 pieces = hertel_mehlhorn(pts, std::move(pieces));
+                 pieces = hertel_mehlhorn(pts, pieces);
                  Result res{true, pieces.size()};
                  if (certify) {
                    std::vector<pd::Ring<double>> rings;
@@ -391,9 +413,22 @@ std::vector<Input> hole_inputs(bool quick)
   return in;
 }
 
+std::vector<Input> scale_inputs()
+{
+  std::vector<Input> in;
+  for (int e = 10; e <= 16; ++e)
+    in.push_back({"scale", "star-" + std::to_string(1 << e), {pd::gen::star_polygon(1 << e, 1), {}}, "star"});
+  for (int e = 10; e <= 16; ++e)
+    in.push_back({"scale", "comb-" + std::to_string(1 << e), {pd::gen::comb((1 << e) / 4), {}}, "comb"});
+  for (int e = 4; e <= 14; ++e)
+    in.push_back({"scale", "holes-" + std::to_string(1 << e), pd::gen::random_holes(1 << e, 1), "holes"});
+  return in;
+}
+
 int usage()
 {
-  std::cerr << "usage: pd_bench [--suite simple|holes|all] [--repeats R] [--csv FILE] [--quick]\n";
+  std::cerr << "usage: pd_bench [--suite simple|holes|all|scale] [--repeats R] [--csv FILE] [--quick]\n"
+               "                [--budget-ms T]\n";
   return 2;
 }
 
@@ -403,6 +438,7 @@ int main(int argc, char** argv)
 {
   std::string suite = "all", csv_path;
   int repeats = 5;
+  double budget_ms = 5000;
   bool quick = false;
   for (int i = 1; i < argc; ++i) {
     const std::string a = argv[i];
@@ -410,16 +446,19 @@ int main(int argc, char** argv)
     else if (a == "--repeats" && i + 1 < argc) repeats = std::stoi(argv[++i]);
     else if (a == "--csv" && i + 1 < argc) csv_path = argv[++i];
     else if (a == "--quick") quick = true;
+    else if (a == "--budget-ms" && i + 1 < argc) budget_ms = std::stod(argv[++i]);
     else return usage();
   }
-  if (suite != "simple" && suite != "holes" && suite != "all") return usage();
+  if (suite != "simple" && suite != "holes" && suite != "all" && suite != "scale") return usage();
 
   std::vector<Input> inputs;
-  if (suite != "holes") inputs = simple_inputs(quick);
-  if (suite != "simple") {
+  if (suite == "scale") inputs = scale_inputs();
+  if (suite == "simple" || suite == "all") inputs = simple_inputs(quick);
+  if (suite == "holes" || suite == "all") {
     auto h = hole_inputs(quick);
     inputs.insert(inputs.end(), h.begin(), h.end());
   }
+  std::set<std::pair<std::string, std::string>> over_budget;  // (series, method)
 
   std::ofstream file;
   if (!csv_path.empty()) file.open(csv_path);
@@ -433,7 +472,7 @@ int main(int argc, char** argv)
     const bool simple = in.poly.holes.empty();
     const std::size_t lower = simple ? (reflex + 1) / 2 + 1 : 0;
     std::vector<Method> methods = our_methods();
-    if (!simple)
+    if (!simple && in.series.empty())
       methods.push_back({"ours-holes-exact", [](const pd::PolygonWithHoles<double>& p, bool) {
                            pd::HoleElimOptions o;
                            o.validate_input = false;
@@ -445,10 +484,20 @@ int main(int argc, char** argv)
 #ifdef PD_HAVE_CGAL
     for (auto& m : cgal_methods(simple, n)) methods.push_back(std::move(m));
 #endif
+    if (!in.series.empty()) {
+      methods.push_back({"validate-double", [](const pd::PolygonWithHoles<double>& p, bool) {
+                           return Result{pd::validate<pd::DoubleKernel>(p).ok(), 0};
+                         }});
+      methods.push_back({"validate-exact", [](const pd::PolygonWithHoles<double>& p, bool) {
+                           return Result{pd::validate<pd::ExactKernel>(pd::convert_polygon<pd::ExactKernel>(p)).ok(), 0};
+                         }});
+    }
     for (const Method& m : methods) {
-      Result res;
+      if (over_budget.count({in.series, m.first})) continue;
+      Result res = m.second(in.poly, true);  // untimed, checked by the certificate
+      const int certified = res.certified;
       const double ms = median_ms(repeats, [&]() { res = m.second(in.poly, false); });
-      const int certified = m.second(in.poly, true).certified;  // untimed
+      if (!in.series.empty() && ms > budget_ms) over_budget.insert({in.series, m.first});
       csv << in.suite << ',' << in.name << ',' << n << ',' << in.poly.holes.size() << ',' << reflex << ','
           << lower << ',' << m.first << ',' << (res.ok ? "ok" : "failed") << ',' << res.pieces << ',' << ms
           << ',' << (certified < 0 ? "" : certified ? "1" : "0") << '\n';

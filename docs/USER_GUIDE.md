@@ -268,29 +268,45 @@ The readers throw `pd::ParseError` on malformed files; `pd::convert_polygon` thr
   floating-point run against the exact one).
 - `pd_validate`: checks the input class with both kernels.
 - `pd_gen`: seeded test inputs (families `row`, `star`, `c`, `cluster`, `grid`, and the
-  numerically adversarial `nearcollinear`, `neartouch`, `snapped`; combs; degenerate cases).
+  numerically adversarial `nearcollinear`, `neartouch`, `snapped`; combs; random star-shaped
+  polygons `--star N`; many random holes `--random-holes H`; degenerate cases).
   The same family and seed give the same polygon on every platform.
+- `pd_decompose --cut-rule farthest|closest|boundary|horizontal` chooses the hole-elimination
+  cut (`pd::CutRule`): through the vertex averages of the two holes farthest apart (default) or
+  closest together, the one-hole rule for the hole nearest the outer ring, or a horizontal line
+  through a hole's average. The alternatives exist for comparison; only the default carries the
+  bounded-coordinates guarantee.
 - `pd_bench`: piece counts and timings, with PolyPartition's Hertel and Mehlhorn partition
   (vendored) and, when built with `PD_WITH_CGAL`, CGAL's decompositions and a Hertel and Mehlhorn
   merge of CGAL's constrained triangulation as baselines. Results whose pieces use only input
-  vertices are checked by the exact certificate (column `certified`).
+  vertices are checked by the exact certificate (column `certified`). `--suite scale` measures
+  how the running times grow, up to 2^16 vertices and 2^14 holes, with a time budget per method
+  (`--budget-ms`), and also times input validation.
 
 ## 10. Performance
 
 Convex decomposition performs `O(n (n_c + 1))` predicate evaluations for `n` vertices and
 `n_c` reflex vertices, so it is quadratic in the worst case (for example on combs). Hole
 elimination makes at most `h` cuts, each linear in the size of the current piece apart from
-sorting the crossings and assigning the remaining holes. In the benchmarks of version 1.1.0 the
-exact kernel is about 10 to 90 times slower than the double kernel (median about 40). Indicative
-figures on one core of a Xeon E5-2667 v3 with frequency scaling active: a 2048-vertex
-star-shaped polygon takes about 10 ms in double precision and 0.9 s exactly; a polygon with 256
-holes and about 1000 vertices takes about 4 ms and 0.22 s.
+sorting the crossings and assigning the remaining holes. In the benchmarks of version 1.2.0 the
+exact kernel is about 12 to 87 times slower than the double kernel (median 38). Figures on one
+core of a Xeon E5-2667 v3 at a fixed 3.2 GHz: a 2048-vertex star-shaped polygon takes about 10 ms
+in double precision and 0.9 s exactly; a polygon with 256 holes and about 1000 vertices about
+4 ms and 0.22 s. The running time grows quadratically in practice as well (`pd_bench --suite
+scale`): with the double kernel a 65536-vertex star-shaped polygon takes about 7.5 s, a
+65536-vertex comb about 15 s, and 16384 random holes (about 106000 vertices) about 3.3 s, while
+input validation takes about 6 s, 4 ms and 0.5 s on the same inputs.
 
 ## 11. Limitations
 
 - The input class excludes self-intersecting rings, holes touching each other or the outer
   ring, and nested holes (islands inside holes).
 - Pieces are not conforming: a vertex of one piece can lie inside an edge of a neighbour.
+- Input validation (on by default in `decompose` and `eliminate_holes`) and the simplicity test of
+  `verify_partition` sweep edge bounding boxes in O(E log E + K) time, K being the number of edge
+  pairs whose x ranges overlap. K is O(E) for convex rings but can grow quadratically for large
+  non-convex rings (for example random star-shaped polygons); `validate_input = false` skips the
+  check for inputs known to be valid.
 - The convex decomposition is not optimal. It is within a factor 2 of the optimum; on random
   star-shaped polygons Greene's optimal partition without Steiner points, as provided by CGAL,
   is about 10% smaller.
@@ -309,7 +325,10 @@ legacy inputs, decomposes and certifies 5000 generated polygons, checks them wit
 independent GEOS oracle, runs the floating-point census and the benchmarks against CGAL, and
 writes all tables to `build/paper-results/`. It needs GMP, CGAL and the oracle's Python
 environment (`scripts/oracle/setup_venv.sh`). Timings depend on the machine; the script
-records the processor and its frequency policy. It also records the double kernel with exact
+records the processor and the frequency policy of the benchmark CPU (`PD_BENCH_CPU`, default 2)
+and warns unless its governor is `performance`. For stable timings fix the frequency first (root),
+for example `echo performance | sudo tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor`
+with turbo disabled. Step 10 runs the scaling suite (`SCALE.csv`). It also records the double kernel with exact
 retry on the census inputs (`RETRY.txt`), the test count (`TESTS.txt`) and the degenerate set
 (`DEGENERATE.txt`). The fuzzing campaign is run separately with `scripts/run_fuzz.sh [SECONDS]`
 (clang, preset `clang-fuzz`; logs in `build/clang-fuzz/`).

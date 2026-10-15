@@ -1,10 +1,10 @@
 cff-version: 1.2.0
 message: "If you use this software, please cite it as below."
 title: "polydecomp: exact and robust decomposition of polygons with holes into convex pieces"
-version: 1.1.2
-date-released: 2026-10-14
+version: 1.2.0
+date-released: 2026-10-15
 license: BSD-3-Clause
-repository-code: "https://github.com/yinghui/complex_polygon"
+repository-code: "https://github.com/yinghui/PolyDecomp"
 authors:
   - family-names: Zhang
     given-names: Yinghui

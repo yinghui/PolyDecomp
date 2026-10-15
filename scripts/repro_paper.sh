@@ -11,13 +11,21 @@
 #   8. unit-test case count                                          (TESTS.txt)
 #      and the hand-made degenerate set, exact + certificate         (DEGENERATE.txt)
 #   9. benchmarks against CGAL and PolyPartition                     (BENCH.csv, BENCH.md)
+#  10. scaling: stars and combs up to 2^16 vertices, up to 2^14 holes  (SCALE.csv, SCALE.md)
+#  11. cut-rule ablation, exact + certificate                         (ABLATION.txt)
 # Needs: GMP, CGAL (libcgal-dev), and the oracle venv (scripts/oracle/setup_venv.sh).
-# Timings depend on the machine; the script records its CPU and frequency policy.
+# Timings depend on the machine. The benchmarks run on CPU ${PD_BENCH_CPU:-2}; the
+# script records its frequency policy in MACHINE.txt and warns unless its governor
+# is "performance" (a fixed frequency needs root, for example
+#   echo performance | sudo tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
+# with turbo disabled).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 out=build/paper-results
 mkdir -p "${out}"
 py="${PD_ORACLE_VENV:-$HOME/.venvs/pd-oracle}/bin/python"
+cpu="${PD_BENCH_CPU:-2}"
+freq=/sys/devices/system/cpu/cpu${cpu}/cpufreq
 [ -x "${py}" ] || scripts/oracle/setup_venv.sh
 
 {
@@ -25,8 +33,15 @@ py="${PD_ORACLE_VENV:-$HOME/.venvs/pd-oracle}/bin/python"
   echo "host: $(uname -srm)"
   lscpu | grep -E 'Model name|Socket|Core|Thread|MHz' || true
   echo "governor: $(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null || echo unknown)"
+  echo "bench cpu: ${cpu}"
+  echo "bench governor: $(cat ${freq}/scaling_governor 2>/dev/null || echo unknown)"
+  echo "bench scaling min/max kHz: $(cat ${freq}/scaling_min_freq 2>/dev/null || echo ?) $(cat ${freq}/scaling_max_freq 2>/dev/null || echo ?)"
+  echo "no_turbo: $(cat /sys/devices/system/cpu/intel_pstate/no_turbo 2>/dev/null || echo unknown)"
   g++ --version | head -1
 } > "${out}/MACHINE.txt"
+if [ "$(cat ${freq}/scaling_governor 2>/dev/null)" != performance ]; then
+  echo "warning: CPU ${cpu} governor is not 'performance'; timings will vary with frequency scaling" >&2
+fi
 
 scripts/check.sh
 cmake --preset gcc-bench > /dev/null && cmake --build --preset gcc-bench
@@ -58,6 +73,11 @@ build/gcc-release/pd_gen --degenerate --out build/gcc-release/degenerate.wkt
 build/gcc-release/pd_decompose --verify --wkt build/gcc-release/degenerate.wkt \
   --out build/gcc-release/degenerate.pieces.wkt --stats "${out}/DEGENERATE.jsonl" > "${out}/DEGENERATE.txt" 2>&1
 
-taskset -c 2 build/gcc-bench/pd_bench --repeats 5 --csv "${out}/BENCH.csv"
+taskset -c "${cpu}" build/gcc-bench/pd_bench --repeats 5 --csv "${out}/BENCH.csv"
+echo "bench avg kHz after BENCH: $(cat ${freq}/cpuinfo_avg_freq 2>/dev/null || echo ?)" >> "${out}/MACHINE.txt"
 python3 scripts/summarize_bench.py "${out}/BENCH.csv" > "${out}/BENCH.md"
+taskset -c "${cpu}" build/gcc-bench/pd_bench --suite scale --repeats 3 --csv "${out}/SCALE.csv"
+echo "bench avg kHz after SCALE: $(cat ${freq}/cpuinfo_avg_freq 2>/dev/null || echo ?)" >> "${out}/MACHINE.txt"
+python3 scripts/summarize_bench.py "${out}/SCALE.csv" > "${out}/SCALE.md"
+scripts/run_ablation.sh build/gcc-release "${cpu}" > "${out}/ABLATION.txt"
 echo "results in ${out}/"

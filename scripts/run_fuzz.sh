@@ -20,6 +20,10 @@ p2=$!
 status=0
 wait "${p1}" || status=1
 wait "${p2}" || status=1
-grep -E '^#[0-9]+' fuzz_wkt.log | tail -1
-grep -E '^#[0-9]+' fuzz_grid.log | tail -1
+grep -E '^#[0-9]+: cov:' fuzz_wkt.log | tail -1
+grep -E '^#[0-9]+: cov:' fuzz_grid.log | tail -1
+# In fork mode a crash stops the campaign and prints a report; list any.
+if grep -E 'FUZZ FINDING|ERROR: libFuzzer|ERROR: AddressSanitizer|runtime error:' fuzz_wkt.log fuzz_grid.log; then
+  status=1
+fi
 exit "${status}"

@@ -54,6 +54,13 @@ Ring<double> star_polygon(int n, std::uint64_t seed);
 /// farthest-pair cuts leave most holes on one side, so the recursion is deep.
 PolygonWithHoles<double> spiral_holes(int h, std::uint64_t seed);
 
+/// h random star-shaped holes with 3 to 10 vertices, one in each of the first h
+/// cells of a k x k grid of unit cells (k = ceil(sqrt(h))) inside the square
+/// [0, k]^2, coordinates rounded to 1e-5. Holes stay at least 0.1 apart, so the
+/// polygon is valid for every h >= 1; used for scaling experiments with many
+/// holes. Deterministic in (h, seed).
+PolygonWithHoles<double> random_holes(int h, std::uint64_t seed);
+
 /// Hand-made degenerate inputs: {name, polygon}. Each forces a contact (a cut
 /// line through vertices or along edges), a dangling contact, or a fallback of
 /// the hole-elimination stage.

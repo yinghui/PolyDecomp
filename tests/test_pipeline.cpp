@@ -21,10 +21,12 @@ using EK = pd::ExactKernel;
 const std::string kData = PD_DATA_DIR;
 
 // Runs the exact pipeline and certifies a convex partition of the input.
-pd::PipelineResult<EK::FT> certified(const pd::PolygonWithHoles<double>& in)
+pd::PipelineResult<EK::FT> certified(const pd::PolygonWithHoles<double>& in,
+                                     pd::CutRule rule = pd::CutRule::FarthestPair)
 {
   pd::PipelineOptions opt;
   opt.check = true;
+  opt.cut_rule = rule;
   const auto e = pd::convert_polygon<EK>(in);
   auto r = pd::decompose<EK>(e, opt);
   REQUIRE_MESSAGE(r.ok(), r.diag.message);
@@ -59,6 +61,41 @@ TEST_CASE("pipeline on the degenerate set")
     CAPTURE(d.first);
     certified(d.second);
   }
+}
+
+TEST_CASE("every cut rule certifies and makes at most h cuts")
+{
+  std::vector<pd::PolygonWithHoles<double>> inputs;
+  for (const auto& d : pd::gen::degenerate_set()) inputs.push_back(d.second);
+  for (pd::gen::Family f : pd::gen::all_families())
+    for (std::uint64_t s = 1; s <= 5; ++s) inputs.push_back(pd::gen::generate(f, s));
+  inputs.push_back(pd::gen::random_holes(30, 1));
+  for (pd::CutRule rule : {pd::CutRule::FarthestPair, pd::CutRule::ClosestPair,
+                           pd::CutRule::NearestToBoundary, pd::CutRule::Horizontal})
+    for (std::size_t i = 0; i < inputs.size(); ++i) {
+      CAPTURE(static_cast<int>(rule));
+      CAPTURE(i);
+      const auto r = certified(inputs[i], rule);
+      CHECK(r.stats.holes.cuts <= inputs[i].holes.size());
+    }
+}
+
+TEST_CASE("the default cut rule is the farthest pair")
+{
+  CHECK(pd::PipelineOptions{}.cut_rule == pd::CutRule::FarthestPair);
+  CHECK(pd::HoleElimOptions{}.cut_rule == pd::CutRule::FarthestPair);
+}
+
+TEST_CASE("pipeline on the fuzz finding with a dangling contact")
+{
+  // certified() also checks the hole-free pieces (weakly simple after a dangling contact).
+  const pd::Ring<double> o{{120, 72}, {80, 126}, {62, 75}, {8, 42}, {94, 16}};
+  const pd::PolygonWithHoles<double> in{
+      o,
+      {{{41, 41}, {40, 41}, {47, 42}}, {{51, 48}, {50, 55}, {47, 48}, {40, 49}, {47, 45}},
+       {{43, 42}, {42, 42}, {45, 44}}, {{48, 40}, {47, 41}, {46, 40}, {46, 39}, {47, 39}, {48, 39}}}};
+  const auto r = certified(in);
+  CHECK(r.stats.holes.dangles >= 1);
 }
 
 TEST_CASE("pipeline after dangling contacts: convex pieces strictly simple")

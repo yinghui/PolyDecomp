@@ -189,6 +189,22 @@ TEST_CASE("a cut line along edges of the outer ring")
   CHECK(r.leaves.size() == 3);  // above: left and right of the slot; below: one piece
 }
 
+TEST_CASE("after a dangling contact no hole-free piece repeats a vertex (fuzz finding)")
+{
+  // Found by fuzz_grid in 1.2.0 (present since 1.1.0): a later piece runs along the edge from the
+  // dangling vertex to its split vertex, whose length is zero at the limit.
+  const auto in = pd::PolygonWithHoles<double>{
+      R({{120, 72}, {80, 126}, {62, 75}, {8, 42}, {94, 16}}),
+      {R({{41, 41}, {40, 41}, {47, 42}}), R({{51, 48}, {50, 55}, {47, 48}, {40, 49}, {47, 45}}),
+       R({{43, 42}, {42, 42}, {45, 44}}), R({{48, 40}, {47, 41}, {46, 40}, {46, 39}, {47, 39}, {48, 39}})}};
+  const auto r = run_certified(in);
+  CHECK(r.stats.dangles >= 1);
+  for (std::size_t i = 0; i < r.leaves.size(); ++i) {
+    const auto ring = r.leaf_ring(i);
+    for (std::size_t k = 0; k < ring.size(); ++k) CHECK(!(ring[k] == ring[(k + 1) % ring.size()]));
+  }
+}
+
 TEST_CASE("dangling contacts are split symbolically")
 {
   const auto in = degenerate("dangling-contacts");

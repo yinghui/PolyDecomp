@@ -42,6 +42,7 @@ struct PipelineOptions {
   /// (check_pieces_approx) and report a NumericalFailure if they fail.
   bool self_check = true;
   OnFailure on_failure = OnFailure::Report;  ///< floating-point kernels only
+  CutRule cut_rule = CutRule::FarthestPair;  ///< Stage 1 cut rule (see HoleElimOptions)
 };
 
 struct PipelineStats {
@@ -105,6 +106,7 @@ PipelineResult<typename K::FT> decompose_once(PolygonWithHoles<typename K::FT> i
   s1.validate_input = opt.validate_input;
   s1.check = opt.check;
   s1.keep_tree = opt.keep_tree;
+  s1.cut_rule = opt.cut_rule;
   const PolygonWithHoles<FT> original = input;
   HoleElimination<FT> h = eliminate_holes_once<K>(std::move(input), s1);
   out.stats.holes = h.stats;
@@ -189,6 +191,7 @@ inline PipelineResult<mpq_class> decompose_exact(const PolygonWithHoles<mpq_clas
   r.pool.reserve(s.pool.size());
   for (const auto& p : s.pool) r.pool.push_back(limit_point(p));
   r.hole_free = std::move(s.hole_free);
+  for (auto& g : r.hole_free) drop_coincident(g, r.pool);  // zero-length edges v1 v
   r.stats = s.stats;
   r.diag = std::move(s.diag);
   for (const auto& n : s.hole_tree) {

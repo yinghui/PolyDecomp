@@ -1,5 +1,39 @@
 # Changelog
 
+## 1.2.0 (2026-10-15)
+
+- Fix (found by `fuzz_grid`, present since 1.1.0): after a dangling contact, a hole-free piece that
+  runs along the edge from the dangling vertex to its split vertex repeated that vertex at ε = 0, so
+  `eliminate_holes` and `PipelineResult::hole_free` could return a ring that the certificate rejects.
+  Coincident consecutive vertices are now removed when the symbolic result is evaluated. The convex
+  pieces were not affected. Regression tests at both levels.
+- `scripts/run_fuzz.sh` reports crash reports from the logs (in fork mode a crash stops the campaign
+  while the status counters still read 0).
+- Hole elimination: option `cut_rule` (`HoleElimOptions`, `PipelineOptions`; `pd_decompose
+  --cut-rule farthest|closest|boundary|horizontal`) to compare the choice of the cut line. The
+  default `FarthestPair` is the rule of earlier versions, and results are unchanged. Every rule
+  draws the line through a hole's vertex average, so every cut crosses a hole; only the default is
+  covered by the bounded-coordinates guarantee. `scripts/run_ablation.sh` compares the rules
+  (step 11 of `repro_paper.sh`, `ABLATION.txt`).
+- Generators: `random_holes(h, seed)`, h random star-shaped holes (3 to 10 vertices) in a grid of
+  unit cells, valid for every h; `pd_gen --random-holes H` and `pd_gen --star N` (with `--seed`).
+- `validate`: the hole-in-hole test first compares the point with the hole's bounding box (exact),
+  so the quadratic number of point-in-ring tests is avoided; 16384 random holes now validate in
+  0.7 s instead of 21 s. The edge sweep is unchanged: it takes O(E log E + K) time, K being the
+  number of edge pairs whose x ranges overlap (O(E) for convex rings, up to quadratic otherwise).
+- `pd_bench --suite scale [--budget-ms T]`: random star polygons and combs with 2^10 to 2^16
+  vertices and `random_holes` with 2^4 to 2^14 holes; within each series a method is run on the
+  next size only while its median time stays at most T ms (default 5000). The suite also times
+  input validation (`validate-double`, `validate-exact`).
+- `pd_bench`: the untimed first run is now the one checked by the exact certificate (before, an
+  extra run after timing), so every method runs once less.
+- `pd_bench`: `cgal-cdt-hm` keeps its pieces as linked half-edges, so each merge takes constant
+  time. Before, every merge copied a piece, which was quadratic on combs, where one piece collects
+  the whole base. Same merge order and tests, so the pieces are unchanged.
+- `scripts/repro_paper.sh`: records the frequency policy of the benchmark CPU (governor, min/max,
+  turbo, average frequency after each benchmark), warns unless the governor is `performance`, and
+  adds step 10, the scaling suite (`SCALE.csv`, `SCALE.md`).
+
 ## 1.1.2 (2026-10-14)
 
 Benchmark harness only; the library is unchanged.

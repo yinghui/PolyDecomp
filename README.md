@@ -9,8 +9,8 @@ A C++17 library that decomposes a polygon with holes into convex pieces, in two 
 
 Both stages run on an exact rational kernel (GMP) or a fast double-precision kernel.
 
-Version 1.1.2. Released under the BSD 3-Clause License (see `LICENSE`); cite it as described in
-`CITATION.cff`. Repository: <https://github.com/yinghui/complex_polygon>.
+Version 1.2.0. Released under the BSD 3-Clause License (see `LICENSE`); cite it as described in
+`CITATION.cff`. Repository: <https://github.com/yinghui/PolyDecomp>.
 
 **Documentation:** the user guide (`docs/USER_GUIDE.md`) covers installation, the input class,
 the kernels and their guarantees, the API, the tools and how to reproduce the paper's results.

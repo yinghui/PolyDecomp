@@ -6,6 +6,7 @@
 /// that lie inside it, pairwise disjoint (no two rings touch) and not nested.
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <string>
 #include <tuple>
@@ -217,11 +218,29 @@ ValidationReport validate(const PolygonWithHoles<typename K::FT>& p, const Valid
   for (int k = 1; k < nrings; ++k)
     if (locate<K>(detail::ring_at(p, k).front(), p.outer) != Location::Inside)
       rep.issues.push_back({IssueKind::HoleNotInsideOuter, k});
-  for (int a = 1; a < nrings; ++a)
-    for (int b = 1; b < nrings; ++b)
-      if (a != b && locate<K>(detail::ring_at(p, a).front(), detail::ring_at(p, b)) ==
-                        Location::Inside)
+  // A point outside a hole's bounding box is outside the hole, so the point-in-ring
+  // test runs only for the few pairs that pass this exact box test.
+  std::vector<std::array<FT, 4>> box;  // xmin, xmax, ymin, ymax of each hole
+  box.reserve(p.holes.size());
+  for (const Ring<FT>& r : p.holes) {
+    std::array<FT, 4> bb{r[0].x, r[0].x, r[0].y, r[0].y};
+    for (const Point<FT>& q : r) {
+      if (q.x < bb[0]) bb[0] = q.x;
+      if (bb[1] < q.x) bb[1] = q.x;
+      if (q.y < bb[2]) bb[2] = q.y;
+      if (bb[3] < q.y) bb[3] = q.y;
+    }
+    box.push_back(std::move(bb));
+  }
+  for (int a = 1; a < nrings; ++a) {
+    const Point<FT>& q = detail::ring_at(p, a).front();
+    for (int b = 1; b < nrings; ++b) {
+      const std::array<FT, 4>& bb = box[static_cast<std::size_t>(b - 1)];
+      if (a != b && !(q.x < bb[0] || bb[1] < q.x || q.y < bb[2] || bb[3] < q.y) &&
+          locate<K>(q, detail::ring_at(p, b)) == Location::Inside)
         rep.issues.push_back({IssueKind::HoleInsideHole, a, -1, b});
+    }
+  }
   return rep;
 }
 

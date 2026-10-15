@@ -65,10 +65,23 @@ enum class CutFallback {
   EdgeMidpoint,  ///< the centroid is a vertex: a line through an edge midpoint
 };
 
+/// How the preferred cut line of a node is chosen. Every rule gives a line
+/// through the vertex average of one of the node's holes, so every cut crosses a
+/// hole and hole elimination terminates after at most h cuts. Only FarthestPair
+/// (the default) is covered by the bounded-coordinates guarantee: the other rules
+/// exist to compare the choice of the cut (the paper's ablation).
+enum class CutRule {
+  FarthestPair,       ///< one hole: anchor rule; more: averages of the two holes farthest apart
+  ClosestPair,        ///< one hole: anchor rule; more: averages of the two holes closest together
+  NearestToBoundary,  ///< anchor rule for the hole whose average is nearest to an outer vertex
+  Horizontal,         ///< horizontal line through the average of the node's first hole
+};
+
 struct HoleElimOptions {
   bool validate_input = true;  ///< check the input class first
   bool check = false;          ///< extra invariant checks (piece orientation, unique hole owner)
   bool keep_tree = true;       ///< record the decomposition tree
+  CutRule cut_rule = CutRule::FarthestPair;  ///< choice of the preferred cut line
 };
 
 struct HoleElimStats {
@@ -390,13 +403,10 @@ typename HoleEliminator<K>::Cut HoleEliminator<K>::choose_cut(const Work& w) con
 {
   Point<FT> q0, d0;
   int hole;
-  if (w.holes.size() == 1) {
-    hole = w.holes[0];
-    const Point<FT> c = centroid(hole);
-    // Outer vertex nearest to c (the last one in ring order on ties).
-    const std::size_t m = w.outer.size();
+  const std::size_t m = w.outer.size();
+  // Outer vertex nearest to c (the last one in ring order on ties), and its squared distance.
+  const auto nearest_outer = [&](const Point<FT>& c, FT& best_d2) {
     std::size_t best = 0;
-    FT best_d2 = 0;
     for (std::size_t i = 0; i < m; ++i) {
       const Point<FT>& v = pt(w.outer[i].v);
       const FT dx = v.x - c.x, dy = v.y - c.y;
@@ -406,13 +416,37 @@ typename HoleEliminator<K>::Cut HoleEliminator<K>::choose_cut(const Work& w) con
         best_d2 = d2;
       }
     }
+    return best;
+  };
+  if (opt_.cut_rule == CutRule::Horizontal) {
+    hole = w.holes[0];
+    q0 = centroid(hole);
+    d0 = {FT(1), FT(0)};
+  } else if (w.holes.size() == 1 || opt_.cut_rule == CutRule::NearestToBoundary) {
+    // Anchor rule, for the node's only hole or (NearestToBoundary) for the hole whose
+    // average is nearest to an outer vertex (the first one on ties).
+    hole = w.holes[0];
+    FT best_d2 = 0;
+    std::size_t best = nearest_outer(centroid(hole), best_d2);
+    for (std::size_t k = 1; k < w.holes.size(); ++k) {
+      FT d2 = 0;
+      const std::size_t i = nearest_outer(centroid(w.holes[k]), d2);
+      if (d2 < best_d2) {
+        hole = w.holes[k];
+        best = i;
+        best_d2 = d2;
+      }
+    }
+    const Point<FT> c = centroid(hole);
     const Point<FT>& a0 = pt(w.outer[prev_index(best, m)].v);
     const Point<FT>& a1 = pt(w.outer[best].v);
     const Point<FT>& a2 = pt(w.outer[next_index(best, m)].v);
     q0 = {(a0.x + a1.x + a2.x) / 3, (a0.y + a1.y + a2.y) / 3};
     d0 = {c.x - q0.x, c.y - q0.y};
   } else {
-    // Farthest pair of centroids (the last one in pair order on ties).
+    // Farthest (or, for ClosestPair, closest) pair of centroids, the last one in pair
+    // order on ties.
+    const bool closest = opt_.cut_rule == CutRule::ClosestPair;
     std::vector<Point<FT>> cs;
     for (int h : w.holes) cs.push_back(centroid(h));
     std::size_t r = 0, s = 1;
@@ -421,7 +455,7 @@ typename HoleEliminator<K>::Cut HoleEliminator<K>::choose_cut(const Work& w) con
       for (std::size_t j = i + 1; j < cs.size(); ++j) {
         const FT dx = cs[j].x - cs[i].x, dy = cs[j].y - cs[i].y;
         const FT d2 = dx * dx + dy * dy;
-        if (d2 >= best_d2) {
+        if (closest ? (best_d2 < 0 || d2 <= best_d2) : d2 >= best_d2) {
           r = i;
           s = j;
           best_d2 = d2;
@@ -863,6 +897,19 @@ inline PolygonWithHoles<EpsQ> to_symbolic(const PolygonWithHoles<mpq_class>& p)
   return out;
 }
 
+/// Removes consecutive pool ids whose points coincide. At ε = 0 the edge from a
+/// dangling vertex v1 to its split vertex v = v1 + ε d has length zero; a piece
+/// that runs along it would otherwise repeat the vertex.
+inline void drop_coincident(std::vector<std::uint32_t>& g, const std::vector<Point<mpq_class>>& pool)
+{
+  std::vector<std::uint32_t> out;
+  out.reserve(g.size());
+  for (std::uint32_t id : g)
+    if (out.empty() || !(pool[out.back()] == pool[id])) out.push_back(id);
+  while (out.size() > 1 && pool[out.back()] == pool[out.front()]) out.pop_back();
+  g = std::move(out);
+}
+
 /// The result of a symbolic run, evaluated at ε = 0.
 inline HoleElimination<mpq_class> symbolic_limit(HoleElimination<EpsQ>&& s)
 {
@@ -870,6 +917,7 @@ inline HoleElimination<mpq_class> symbolic_limit(HoleElimination<EpsQ>&& s)
   r.pool.reserve(s.pool.size());
   for (const auto& p : s.pool) r.pool.push_back(limit_point(p));
   r.leaves = std::move(s.leaves);
+  for (auto& g : r.leaves) drop_coincident(g, r.pool);
   for (const auto& n : s.tree) {
     HoleNode<mpq_class> m;
     m.parent = n.parent;

@@ -17,6 +17,9 @@
 //   --stats FILE                one JSON object per input with counts and timing
 //   --retry-exact               with --kernel double: answer a numerical failure by an
 //                               exact rerun (pipeline only)
+//   --cut-rule farthest|closest|boundary|horizontal
+//                               choice of the hole-elimination cut (default farthest;
+//                               the others are for comparison, see pd::CutRule)
 //   --quiet                     no summary on stderr
 //   --compare double|naive      run the exact pipeline and a floating-point one on
 //                               each input and classify the latter as agree /
@@ -62,6 +65,7 @@ struct Config {
   bool verify = false;
   Compare compare = Compare::None;
   bool retry_exact = false;
+  pd::CutRule cut_rule = pd::CutRule::FarthestPair;
   std::ostream* rational = nullptr;
 };
 
@@ -82,7 +86,8 @@ int usage()
   std::cerr << "usage: pd_decompose [--stage both|holes|convex] [--kernel exact|double] [--check]\n"
                "                    [--verify] [--out FILE] [--rational FILE] [--stats FILE] [--quiet]\n"
                "                    (--wkt FILE | --obj OUTER.obj [--hole H.obj ...] | --multi RINGS.obj)\n"
-               "                    [--plane xz|xy] [--compare double|naive]\n";
+               "                    [--plane xz|xy] [--compare double|naive]\n"
+               "                    [--cut-rule farthest|closest|boundary|horizontal]\n";
   return 2;
 }
 
@@ -110,6 +115,7 @@ Outcome run(const pd::PolygonWithHoles<double>& in, const Config& cfg)
   if (cfg.stage == Stage::Both) {
     pd::PipelineOptions opt;
     opt.check = cfg.check;
+    opt.cut_rule = cfg.cut_rule;
     if (cfg.retry_exact) opt.on_failure = pd::OnFailure::RetryExact;
     pr = pd::decompose<K>(input, opt);
     diag = pr.diag;
@@ -136,6 +142,7 @@ Outcome run(const pd::PolygonWithHoles<double>& in, const Config& cfg)
   } else if (cfg.stage == Stage::Holes) {
     pd::HoleElimOptions opt;
     opt.check = cfg.check;
+    opt.cut_rule = cfg.cut_rule;
     hr = pd::eliminate_holes<K>(input, opt);
     diag = hr.diag;
     pieces = hr.leaf_rings();
@@ -353,6 +360,13 @@ int main(int argc, char** argv)
       const std::string k = argv[++i];
       if (k == "double") cfg.compare = Compare::Double;
       else if (k == "naive") cfg.compare = Compare::Naive;
+      else return usage();
+    } else if (a == "--cut-rule" && v) {
+      const std::string r = argv[++i];
+      if (r == "farthest") cfg.cut_rule = pd::CutRule::FarthestPair;
+      else if (r == "closest") cfg.cut_rule = pd::CutRule::ClosestPair;
+      else if (r == "boundary") cfg.cut_rule = pd::CutRule::NearestToBoundary;
+      else if (r == "horizontal") cfg.cut_rule = pd::CutRule::Horizontal;
       else return usage();
     } else if (a == "--check") cfg.check = true;
     else if (a == "--retry-exact") cfg.retry_exact = true;

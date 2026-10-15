@@ -377,6 +377,32 @@ PolygonWithHoles<double> spiral_holes(int h, std::uint64_t seed)
   throw std::runtime_error("spiral_holes: no valid polygon");
 }
 
+PolygonWithHoles<double> random_holes(int h, std::uint64_t seed)
+{
+  if (h < 1) throw std::invalid_argument("random_holes: h must be at least 1");
+  Rng g(seed * 0x9E3779B97F4A7C15ULL + 0x7a3d);
+  const int k = static_cast<int>(std::ceil(std::sqrt(static_cast<double>(h))));
+  const double side = k;
+  PolygonWithHoles<double> p{{{0, 0}, {side, 0}, {side, side}, {0, side}}, {}};
+  p.holes.reserve(static_cast<std::size_t>(h));
+  for (int c = 0; c < h; ++c) {
+    // Centre within 0.05 of the cell centre, radii in [0.15, 0.4]: the hole stays
+    // inside [0.05, 0.95] of its cell. Angles increase strictly (jitter below half
+    // a step), so the ring is star-shaped about its centre and simple.
+    const double cx = c % k + 0.5 + g.uniform(-0.05, 0.05), cy = c / k + 0.5 + g.uniform(-0.05, 0.05);
+    const int m = g.integer(3, 10);
+    const double a0 = g.uniform(0, kTwoPi), step = kTwoPi / m;
+    Ring<double> r;
+    for (int i = 0; i < m; ++i) {
+      const double a = a0 + (i + g.uniform(-0.3, 0.3)) * step, rad = g.uniform(0.15, 0.4);
+      r.push_back({cx + rad * std::cos(a), cy + rad * std::sin(a)});
+    }
+    p.holes.push_back(rounded(r));
+  }
+  if (!validate<DoubleKernel>(p).ok()) throw std::runtime_error("random_holes: invalid polygon");
+  return p;
+}
+
 std::vector<std::pair<std::string, PolygonWithHoles<double>>> degenerate_set()
 {
   auto sq = [](double x0, double y0, double x1, double y1) {
