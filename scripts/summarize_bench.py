@@ -20,7 +20,7 @@ def group_of(suite, name):
     """Simple suite: star-<n>-<seed> -> star-<n>, comb-<n> kept. Holes suite:
     spiral-<h> kept, <family>-<seed> -> <family>. Legacy inputs and every input of the
     scale suite (star-<n>, comb-<n>, holes-<h>) are their own group."""
-    if name.startswith("legacy-") or suite == "scale":
+    if name.startswith("legacy-") or suite in ("scale", "hole-scale"):
         return name
     if suite == "simple":
         m = re.match(r"^(star|comb)-(\d+)", name)
@@ -40,7 +40,7 @@ def main(path):
 
     failed = [r for r in rows if r["status"] != "ok"]
     print(f"rows {len(rows)}, failed runs {len(failed)}")
-    for suite in ("simple", "holes", "scale"):
+    for suite in ("simple", "holes", "scale", "hole-scale"):
         keys = [g for g in groups if g[0] == suite]
         if not keys:
             continue

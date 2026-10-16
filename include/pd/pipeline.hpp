@@ -28,12 +28,6 @@
 
 namespace pd {
 
-/// What a floating-point run does when it detects a numerical failure.
-enum class OnFailure {
-  Report,      ///< return the NumericalFailure diagnostics
-  RetryExact,  ///< rerun the whole input with ExactKernel and return that result, rounded
-};
-
 struct PipelineOptions {
   bool validate_input = true;  ///< check the input class first
   bool check = false;          ///< extra invariant checks in both stages

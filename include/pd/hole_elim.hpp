@@ -50,6 +50,7 @@
 #include "pd/geometry.hpp"
 #include "pd/status.hpp"
 #include "pd/validate.hpp"
+#include "pd/verify.hpp"
 #ifdef PD_HAVE_GMP
 #include <gmpxx.h>
 
@@ -77,11 +78,22 @@ enum class CutRule {
   Horizontal,         ///< horizontal line through the average of the node's first hole
 };
 
+/// What a floating-point run does when it detects a numerical failure.
+enum class OnFailure {
+  Report,      ///< return the NumericalFailure diagnostics
+  RetryExact,  ///< rerun the whole input with ExactKernel and return that result, rounded
+};
+
 struct HoleElimOptions {
   bool validate_input = true;  ///< check the input class first
   bool check = false;          ///< extra invariant checks (piece orientation, unique hole owner)
   bool keep_tree = true;       ///< record the decomposition tree
   CutRule cut_rule = CutRule::FarthestPair;  ///< choice of the preferred cut line
+  /// Floating-point kernels only: check the output's necessary conditions (check_pieces_approx:
+  /// simple counter-clockwise pieces whose areas sum to the input's within a relative 1e-9) and
+  /// report a NumericalFailure if they fail.
+  bool self_check = true;
+  OnFailure on_failure = OnFailure::Report;  ///< floating-point kernels only
 };
 
 struct HoleElimStats {
@@ -96,6 +108,7 @@ struct HoleElimStats {
   std::size_t fallback_midpoint = 0;      ///< cuts that used CutFallback::EdgeMidpoint
   std::size_t degenerate_directions = 0;  ///< preferred line had no direction
   bool symbolic = false;                  ///< computed with the symbolic kernel (then ε = 0)
+  bool retried_exact = false;             ///< the result comes from an exact rerun (OnFailure::RetryExact)
 };
 
 template <class FT>
@@ -971,15 +984,19 @@ inline HoleElimination<mpq_class> symbolic_limit(HoleElimination<EpsQ>&& s)
 } // namespace detail
 
 /// Eliminates the holes of a polygon: returns hole-free pieces that tile it.
-/// The input must be a valid complex polygon (see validate); ring orientations
+/// The input must be a valid polygon with holes (see validate); ring orientations
 /// are arbitrary. The pieces are simple and counter-clockwise, except after a
 /// dangling contact (stats.dangles > 0, exact kernel), where a piece may touch
 /// itself at that vertex (it is weakly simple); decompose's convex pieces are
-/// simple in every case.
+/// simple in every case. With a floating-point kernel the result is checked
+/// (opt.self_check), and with opt.on_failure == RetryExact a numerical failure is
+/// answered by an exact rerun whose result is rounded to doubles (requires GMP;
+/// stats.retried_exact is set).
 template <class K>
 HoleElimination<typename K::FT> eliminate_holes(PolygonWithHoles<typename K::FT> input,
                                                 const HoleElimOptions& opt = {})
 {
+  using FT = typename K::FT;
 #ifdef PD_HAVE_GMP
   if constexpr (std::is_same_v<K, ExactKernel>) {
     HoleElimination<mpq_class> out = detail::eliminate_holes_once<K>(input, opt);
@@ -989,7 +1006,45 @@ HoleElimination<typename K::FT> eliminate_holes(PolygonWithHoles<typename K::FT>
     return detail::symbolic_limit(detail::eliminate_holes_once<SymbolicKernel>(detail::to_symbolic(input), s));
   }
 #endif
-  return detail::eliminate_holes_once<K>(std::move(input), opt);
+  if constexpr (is_exact_kernel<K>::value) {
+    return detail::eliminate_holes_once<K>(std::move(input), opt);
+  } else {
+    HoleElimination<FT> out = detail::eliminate_holes_once<K>(input, opt);
+    if (out.ok() && opt.self_check) {
+      const VerifyReport rep =
+          check_pieces_approx<K>(input, out.leaf_rings(), false, std::max(K::angle_tolerance, 1e-12), 1e-9);
+      if (!rep.ok) out.diag = {Status::NumericalFailure, "self-check: " + rep.failure, {}};
+    }
+#ifdef PD_HAVE_GMP
+    if constexpr (std::is_same_v<FT, double>) {
+      if (opt.on_failure == OnFailure::RetryExact && out.diag.status == Status::NumericalFailure) {
+        HoleElimination<mpq_class> ex = eliminate_holes<ExactKernel>(convert_polygon<ExactKernel>(input), opt);
+        HoleElimination<double> r;
+        r.pool.reserve(ex.pool.size());
+        for (const auto& p : ex.pool) r.pool.push_back({p.x.get_d(), p.y.get_d()});
+        r.leaves = std::move(ex.leaves);
+        for (const auto& n : ex.tree) {
+          HoleNode<double> m;
+          m.parent = n.parent;
+          m.children = n.children;
+          m.leaf = n.leaf;
+          m.holes = n.holes;
+          m.has_cut = n.has_cut;
+          m.cut_point = {n.cut_point.x.get_d(), n.cut_point.y.get_d()};
+          m.cut_dir = {n.cut_dir.x.get_d(), n.cut_dir.y.get_d()};
+          m.fallback = n.fallback;
+          m.pierced = n.pierced;
+          r.tree.push_back(std::move(m));
+        }
+        r.stats = ex.stats;
+        r.stats.retried_exact = true;
+        r.diag = std::move(ex.diag);
+        return r;
+      }
+    }
+#endif
+    return out;
+  }
 }
 
 } // namespace pd

@@ -39,7 +39,7 @@ def summarize(path):
         "symbolic": total("symbolic"),
         "fb_rotated": total("fallback_rotated"),
         "fb_midpoint": total("fallback_midpoint"),
-        "max_depth": most("max_depth_holes"),
+        "max_depth": max(most("max_depth_holes"), most("max_depth")),
         "max_bits": most("max_bits"),
         "median_ms": statistics.median(times) if times else 0.0,
         "max_ms": max(times, default=0.0),

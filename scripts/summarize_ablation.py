@@ -28,8 +28,9 @@ def main(d):
             rows = [json.loads(line) for p in parts for line in open(d / f"{rule}.{p}.jsonl") if line.strip()]
             vals = [rule, name, len(rows), sum(r["status"] == "ok" for r in rows),
                     sum(bool(r.get("verified")) for r in rows), sum(r["holes"] for r in rows),
-                    sum(r["cuts"] for r in rows), max(r["max_depth_holes"] for r in rows),
-                    sum(r["hole_free_pieces"] for r in rows), sum(r["convex_pieces"] for r in rows),
+                    sum(r["cuts"] for r in rows), max(r.get("max_depth_holes", r.get("max_depth", 0)) for r in rows),
+                    sum(r["hole_free_pieces"] for r in rows),
+                    sum(r["convex_pieces"] for r in rows) if all("convex_pieces" in r for r in rows) else "-",
                     f"{sum(r['time_ms'] for r in rows):.0f}"]
             print(" ".join(f"{v:>10}" for v in vals))
 

@@ -1,5 +1,49 @@
 # Changelog
 
+## 1.4.0 (2026-10-17)
+
+The paper now covers exact cutting and hole elimination; the convex decomposition stays in the
+library, unchanged.
+
+
+- `eliminate_holes` with a floating-point kernel now checks its result (`HoleElimOptions::self_check`,
+  on by default: simple counter-clockwise pieces whose areas sum to the input's within a relative
+  1e-9) and can answer a numerical failure with an exact rerun
+  (`HoleElimOptions::on_failure = OnFailure::RetryExact`, `stats.retried_exact`), as `decompose`
+  does. Before, a rounded construction could make the double kernel return hole-free pieces whose
+  areas miss the input area without a report (2 of 5900 census inputs, both near-touching holes).
+  `OnFailure` moved to `pd/hole_elim.hpp` (still available through `pd/pipeline.hpp`).
+- `pd_decompose --stage holes` accepts `--retry-exact` and `--compare double|naive` (the census of
+  hole elimination alone: agree, valid deviation, wrong, reported failure).
+- `pd_bench --suite hole-scale`: hole elimination with the exact and the double kernel and
+  PolyPartition's `RemoveHoles` (bridging), on random holes with 2^4 to 2^14 holes and cheese with
+  2^4 to 2^12 holes, with the time budget of the scale suite, and input validation.
+- `pd_bench --suite slice`: a fourth method, `cgal-arrangement`, cuts with a CGAL arrangement of
+  segments on Epeck (each line inserted once, face flags kept by an observer); its material faces
+  are certified after the last cut.
+- `pd_bench --suite strokes`: a game workload. Pieces carry rigid motions and drift apart after
+  every cut; a finite stroke drawn in the world cuts the pieces it crosses, along its line mapped
+  into each piece's frame (`Slicer::cut(i, a, b)`); the pieces pass the exact certificate in their
+  own frames after every stroke.
+- `pd_bench --suite strokes --world FILE` writes the pieces of the first shape after the last
+  stroke, placed in the world by their motions (WKT, one polygon per line), for figures.
+- `pd_decompose --compare` records `other_fallbacks`, the cuts of the floating-point run that used a
+  fallback line, so that deviations of the double kernel can be traced to its clearance.
+- The GEOS oracle (`scripts/oracle/oracle.py`) takes `--rational FILE` (the exact pieces of
+  `pd_decompose --rational`): a piece that GEOS finds invalid is checked again in exact rational
+  arithmetic and counted as "invalid only after rounding" if its exact ring is simple. Rounding an
+  exact result to doubles can merge two vertices closer than a unit in the last place (for example
+  the two crossings of a cut that passes next to a hole corner), so that the rounded ring touches
+  itself; 6 pieces of 5 generated grid inputs do this, while their exact rings are simple.
+  `run_generated.sh` writes the exact pieces (`*.pieces.rat`) for this check.
+- The fuzz targets also run hole elimination with the double kernel and `RetryExact` on every
+  valid input and require it to succeed.
+- `scripts/run_generated.sh`, `run_census.sh` and `run_ablation.sh` take an optional stage
+  (`holes` runs hole elimination only); `scripts/repro_paper.sh` regenerates the results of the
+  paper on exact cutting and hole elimination (steps 1 to 12; the convex benchmarks, `BENCH.csv`
+  and `SCALE.csv`, are no longer part of it and remain available through `pd_bench`). It now clears
+  the results of an earlier run first.
+
 ## 1.3.0 (2026-10-16)
 
 - New: `pd::Slicer` (`pd/slice.hpp`, included by `pd/pd.hpp`; needs GMP) cuts a polygon with holes

@@ -305,3 +305,33 @@ TEST_CASE("double kernel runs the legacy inputs")
 #endif
   }
 }
+
+#ifdef PD_HAVE_GMP
+TEST_CASE("eliminate_holes with the double kernel: self-check and exact retry")
+{
+  // Near-touching holes, seed 49: a rounded construction makes the piece areas miss the input area,
+  // which the self-check reports (found by the floating-point census of hole elimination).
+  const auto in = pd::gen::generate(pd::gen::Family::NearTouch, 49);
+  pd::HoleElimOptions opt;
+  const auto checked = pd::eliminate_holes<pd::DoubleKernel>(in, opt);
+  CHECK(checked.diag.status == pd::Status::NumericalFailure);
+  CHECK(checked.diag.message.find("self-check") != std::string::npos);
+
+  opt.self_check = false;  // unchecked, the failure goes unnoticed
+  CHECK(pd::eliminate_holes<pd::DoubleKernel>(in, opt).ok());
+
+  opt.self_check = true;
+  opt.on_failure = pd::OnFailure::RetryExact;
+  const auto retried = pd::eliminate_holes<pd::DoubleKernel>(in, opt);
+  REQUIRE(retried.ok());
+  CHECK(retried.stats.retried_exact);
+  const auto exact = pd::eliminate_holes<pd::ExactKernel>(pd::convert_polygon<pd::ExactKernel>(in));
+  REQUIRE(exact.ok());
+  CHECK(retried.leaves == exact.leaves);  // the exact result, rounded once
+
+  // An ordinary input passes the self-check without a retry.
+  const auto fine = pd::eliminate_holes<pd::DoubleKernel>(pd::gen::cheese(16, 1), opt);
+  CHECK(fine.ok());
+  CHECK_FALSE(fine.stats.retried_exact);
+}
+#endif

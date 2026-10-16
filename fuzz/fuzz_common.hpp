@@ -2,8 +2,9 @@
 // Copyright (c) 2026 Yinghui Zhang
 #pragma once
 // Shared oracle for the fuzz targets: on every valid input the exact pipeline
-// must succeed and pass the exact certificate, and the double pipeline with
-// RetryExact must succeed. Any violation aborts (a finding for libFuzzer).
+// must succeed and pass the exact certificate (convex and hole-free pieces), and
+// the double pipeline and double hole elimination, each with RetryExact, must
+// succeed. Any violation aborts (a finding for libFuzzer).
 
 #include <cmath>
 #include <cstddef>
@@ -85,6 +86,11 @@ inline void check_polygon(const pd::PolygonWithHoles<double>& p)
   opt.on_failure = pd::OnFailure::RetryExact;
   const auto d = pd::decompose<DK>(p, opt);
   if (!d.ok()) bug("double pipeline with RetryExact failed", d.diag.message);
+
+  pd::HoleElimOptions hopt;  // hole elimination alone: self-check, then the exact rerun
+  hopt.on_failure = pd::OnFailure::RetryExact;
+  const auto h = pd::eliminate_holes<DK>(p, hopt);
+  if (!h.ok()) bug("double hole elimination with RetryExact failed", h.diag.message);
 }
 
 } // namespace pd_fuzz

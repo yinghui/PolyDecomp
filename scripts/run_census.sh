@@ -3,13 +3,15 @@
 # Floating-point robustness census: for every generator family, runs the exact
 # pipeline and a floating-point one (the robust double kernel, and the naive
 # unprotected baseline) on the same inputs and classifies each run.
-#   usage: scripts/run_census.sh [COUNT_REGULAR] [COUNT_ADVERSARIAL] [BUILD_DIR]
-#   (defaults: 1000, 300, build/gcc-release; output in BUILD_DIR/census/)
+#   usage: scripts/run_census.sh [COUNT_REGULAR] [COUNT_ADVERSARIAL] [BUILD_DIR] [STAGE]
+#   (defaults: 1000, 300, build/gcc-release, both; STAGE holes compares hole elimination only;
+#   output in BUILD_DIR/census/)
 set -euo pipefail
 cd "$(dirname "$0")/.."
 nreg="${1:-1000}"
 nadv="${2:-300}"
 build="${3:-build/gcc-release}"
+stage="${4:-both}"
 out="${build}/census"
 mkdir -p "${out}"
 
@@ -21,7 +23,7 @@ for f in "${adversarial[@]}"; do "${build}/pd_gen" --family "${f}" --count "${na
 pids=()
 for f in "${regular[@]}" "${adversarial[@]}"; do
   for k in double naive; do
-    "${build}/pd_decompose" --quiet --wkt "${out}/${f}.wkt" --compare "${k}" --stats "${out}/${f}.${k}.jsonl" &
+    "${build}/pd_decompose" --quiet --stage "${stage}" --wkt "${out}/${f}.wkt" --compare "${k}" --stats "${out}/${f}.${k}.jsonl" &
     pids+=($!)
   done
 done

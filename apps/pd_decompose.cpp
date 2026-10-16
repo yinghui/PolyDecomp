@@ -21,7 +21,8 @@
 //                               choice of the hole-elimination cut (default farthest;
 //                               the others are for comparison, see pd::CutRule)
 //   --quiet                     no summary on stderr
-//   --compare double|naive      run the exact pipeline and a floating-point one on
+//   --compare double|naive      run the exact pipeline (with --stage holes, hole
+//                               elimination) and a floating-point one on
 //                               each input and classify the latter as agree /
 //                               deviate / reported_failure (stats in --stats)
 //
@@ -143,6 +144,7 @@ Outcome run(const pd::PolygonWithHoles<double>& in, const Config& cfg)
     pd::HoleElimOptions opt;
     opt.check = cfg.check;
     opt.cut_rule = cfg.cut_rule;
+    if (cfg.retry_exact) opt.on_failure = pd::OnFailure::RetryExact;
     hr = pd::eliminate_holes<K>(input, opt);
     diag = hr.diag;
     pieces = hr.leaf_rings();
@@ -158,6 +160,7 @@ Outcome run(const pd::PolygonWithHoles<double>& in, const Config& cfg)
                 {"fallback_midpoint", s.fallback_midpoint},
                 {"degenerate_directions", s.degenerate_directions},
                 {"max_depth", s.max_depth},
+                {"retried_exact", s.retried_exact ? 1u : 0u},
                 {"symbolic", s.symbolic ? 1u : 0u}};
   } else {
     if (!in.holes.empty()) {
@@ -225,6 +228,7 @@ struct Comparison {
   bool pieces_convex = false;  // every piece convex up to the kernel's angle tolerance
   double exact_ms = 0, other_ms = 0;
   std::size_t exact_pieces = 0, other_pieces = 0;
+  std::size_t other_fallbacks = 0;  // cuts of the floating-point run that used a fallback line
 };
 
 template <class KO>
@@ -249,6 +253,7 @@ Comparison compare(const pd::PolygonWithHoles<double>& in, bool check)
   c.other_message = d.diag.message;
   c.exact_pieces = e.leaves.size();
   c.other_pieces = d.leaves.size();
+  c.other_fallbacks = d.stats.holes.fallback_rotated + d.stats.holes.fallback_midpoint;
   if (!e.ok()) {
     c.category = "exact_failed";
     return c;
@@ -288,6 +293,64 @@ Comparison compare(const pd::PolygonWithHoles<double>& in, bool check)
   }
   if (c.same_structure && c.max_rel_diff <= 1e-9) c.category = "agree";
   else if (c.pieces_simple && c.pieces_convex && c.area_rel_err <= 1e-9) c.category = "deviate_valid";
+  else c.category = "deviate_suspect";
+  return c;
+}
+// The same comparison for hole elimination alone (--stage holes): the pieces must be simple and
+// counter-clockwise and their areas must sum to the input's (no convexity).
+template <class KO>
+Comparison compare_holes(const pd::PolygonWithHoles<double>& in, bool check)
+{
+  using EK = pd::ExactKernel;
+  Comparison c;
+  pd::HoleElimOptions opt;
+  opt.check = check;
+  opt.keep_tree = false;
+  auto t0 = std::chrono::steady_clock::now();
+  const auto e = pd::eliminate_holes<EK>(pd::convert_polygon<EK>(in), opt);
+  auto t1 = std::chrono::steady_clock::now();
+  opt.validate_input = false;   // validated (exactly) by the run above
+  opt.self_check = KO::robust;  // the naive baseline runs without any protection
+  const auto d = e.ok() ? pd::eliminate_holes<KO>(in, opt) : pd::HoleElimination<double>{};
+  auto t2 = std::chrono::steady_clock::now();
+  c.exact_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+  c.other_ms = std::chrono::duration<double, std::milli>(t2 - t1).count();
+  c.exact_status = e.diag.status;
+  c.other_status = d.diag.status;
+  c.other_message = d.diag.message;
+  c.exact_pieces = e.leaves.size();
+  c.other_pieces = d.leaves.size();
+  c.other_fallbacks = d.stats.fallback_rotated + d.stats.fallback_midpoint;
+  if (!e.ok()) {
+    c.category = "exact_failed";
+    return c;
+  }
+  if (!d.ok()) {
+    c.category = "reported_failure";
+    return c;
+  }
+  double scale = 1, area_in = std::abs(pd::signed_area2(in.outer));
+  for (const auto& p : in.outer) scale = std::max({scale, std::abs(p.x), std::abs(p.y)});
+  for (const auto& h : in.holes) area_in -= std::abs(pd::signed_area2(h));
+  double area_out = 0;
+  for (std::size_t l = 0; l < d.leaves.size(); ++l) area_out += pd::signed_area2(d.leaf_ring(l));
+  c.area_rel_err = std::abs(area_out - area_in) / area_in;
+  c.same_structure = d.pool.size() == e.pool.size() && d.leaves == e.leaves;
+  if (c.same_structure) {
+    c.max_rel_diff = 0;
+    for (std::size_t i = 0; i < e.pool.size(); ++i)
+      c.max_rel_diff = std::max({c.max_rel_diff, std::abs(d.pool[i].x - e.pool[i].x.get_d()) / scale,
+                                 std::abs(d.pool[i].y - e.pool[i].y.get_d()) / scale});
+  }
+  c.pieces_simple = true;
+  c.pieces_convex = false;  // not required of hole-free pieces
+  for (std::size_t l = 0; l < d.leaves.size(); ++l) {
+    const pd::Ring<double> r = d.leaf_ring(l);
+    c.pieces_simple = c.pieces_simple && pd::validate<pd::DoubleKernel>({r, {}}).ok() &&
+                      pd::ring_orientation<pd::DoubleKernel>(r) > 0;
+  }
+  if (c.same_structure && c.max_rel_diff <= 1e-9) c.category = "agree";
+  else if (c.pieces_simple && c.area_rel_err <= 1e-9) c.category = "deviate_valid";
   else c.category = "deviate_suspect";
   return c;
 }
@@ -436,8 +499,13 @@ int main(int argc, char** argv)
     if (cfg.compare != Compare::None) {
       std::map<std::string, std::size_t> tally;
       for (std::size_t i = 0; i < inputs.size(); ++i) {
-        const Comparison c = cfg.compare == Compare::Double ? compare<pd::DoubleKernel>(inputs[i], cfg.check)
-                                                            : compare<pd::NaiveDoubleKernel>(inputs[i], cfg.check);
+        const bool holes = cfg.stage == Stage::Holes;
+        const Comparison c =
+            cfg.compare == Compare::Double
+                ? (holes ? compare_holes<pd::DoubleKernel>(inputs[i], cfg.check)
+                         : compare<pd::DoubleKernel>(inputs[i], cfg.check))
+                : (holes ? compare_holes<pd::NaiveDoubleKernel>(inputs[i], cfg.check)
+                         : compare<pd::NaiveDoubleKernel>(inputs[i], cfg.check));
         ++tally[c.category];
         if (stats_file.is_open()) {
           stats_file << "{\"index\":" << i << ",\"category\":\"" << c.category << "\""
@@ -449,7 +517,8 @@ int main(int argc, char** argv)
                      << ",\"pieces_simple\":" << (c.pieces_simple ? "true" : "false")
                      << ",\"pieces_convex\":" << (c.pieces_convex ? "true" : "false")
                      << ",\"exact_pieces\":" << c.exact_pieces << ",\"other_pieces\":" << c.other_pieces
-                     << ",\"exact_ms\":" << c.exact_ms << ",\"other_ms\":" << c.other_ms;
+                     << ",\"exact_ms\":" << c.exact_ms << ",\"other_ms\":" << c.other_ms
+                     << ",\"other_fallbacks\":" << c.other_fallbacks;
           if (!c.other_message.empty())
             stats_file << ",\"other_message\":\"" << json_escape(c.other_message) << "\"";
           stats_file << "}\n";

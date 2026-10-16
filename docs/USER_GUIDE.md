@@ -142,14 +142,19 @@ point is rounded once. To keep rounded constructions consistent the kernel addit
 - keeps every cut line at least 1e-9 times the coordinate scale away from every vertex that
   does not lie exactly on it, and replaces a line with a dangling contact by the fallback line
   (no symbolic split in floating point);
-- does not split vertices whose turn is below 1e-12 radians (pieces are convex up to that
-  angle), because the needle-shaped pieces this would create cannot be represented in double
-  precision;
-- checks each result before returning it: every piece simple and counter-clockwise, convex up
-  to 1e-12 radians, and the piece areas summing to the input area within a relative 1e-9.
+- in the convex decomposition, does not split vertices whose turn is below 1e-12 radians
+  (pieces are convex up to that angle), because the needle-shaped pieces this would create
+  cannot be represented in double precision;
+- checks each result before returning it: every piece simple and counter-clockwise, the piece
+  areas summing to the input area within a relative 1e-9, and, for `decompose`, every piece
+  convex up to 1e-12 radians. `eliminate_holes` does this check too (since 1.4.0,
+  `HoleElimOptions::self_check`, on by default).
 A detected problem is reported as `pd::Status::NumericalFailure` rather than returned as a
-wrong result; with `PipelineOptions::on_failure = OnFailure::RetryExact` the input is re-run
-with the exact kernel instead (requires GMP; `stats.retried_exact` is set).
+wrong result; with `on_failure = OnFailure::RetryExact` (in `PipelineOptions` or
+`HoleElimOptions`) the input is re-run with the exact kernel instead and the result rounded to
+doubles (requires GMP; `stats.retried_exact` is set). In the census of the paper (5900
+inputs), the double kernel returned no wrong hole-free result, where plain floating point
+returned 557, and its check caught 2 results whose areas were off (holes 2^-30 apart).
 
 **NaiveDoubleKernel** evaluates the predicate in plain floating point and has none of these
 protections. It exists only to measure what they are worth.
@@ -270,6 +275,16 @@ weakly_simple)` certifies pieces that still contain holes: every hole of a piece
 used by one piece only, that lies inside that piece (a vertex strictly inside its outer ring and no
 edge meeting that ring), and the outer rings tile the input with those holes filled. `convex(i)` runs the pipeline on piece `i`.
 
+**Moving pieces.** In a game the pieces move after a cut. Keep a rigid motion (rotation and
+translation) per piece in the application, and keep the slicer's pieces in the frame of the
+input. To cut with a line drawn in the world, map its two points into the frame of each piece
+that it crosses with the inverse motion and call `cut(i, a, b)` for that piece, from the highest
+index down so that the indices of the other pieces stay valid; the new pieces inherit the motion
+of their parent. Each cut is exact for the mapped line; rounding the mapped points only moves the
+line by a few units in the last place relative to the piece, and the pieces still tile the input
+in its frame. `pd_bench --suite strokes` implements this workload (finite strokes, pieces that
+drift apart, the certificate after every stroke).
+
 ## 7. Results
 
 All three entry points return a result with
@@ -315,7 +330,9 @@ The readers throw `pd::ParseError` on malformed files; `pd::convert_polygon` thr
 - `pd_decompose`: decomposes every polygon in a WKT file, or an OBJ input. Options: `--stage
   both|holes|convex`, `--kernel exact|double`, `--verify` (exact certificate), `--retry-exact`,
   `--out` (WKT), `--rational`, `--stats` (JSON lines), `--compare double|naive` (classify a
-  floating-point run against the exact one).
+  floating-point run against the exact one, for the pipeline or, with `--stage holes`, for hole
+  elimination alone; the records include `other_fallbacks`, the fallback lines of the
+  floating-point run).
 - `pd_validate`: checks the input class with both kernels.
 - `pd_slice`: cuts the first polygon of a WKT file along lines (`--cut X0 Y0 X1 Y1`, `--graze H J`
   for the exact tangent at vertex J of hole H, or `--through H1 J1 H2 J2` for the line through two
@@ -340,26 +357,38 @@ The readers throw `pd::ParseError` on malformed files; `pd::convert_polygon` thr
   (`--budget-ms`), and also times input validation. `--suite slice [--cuts N]` cuts cheese, random
   holes and the sample polygon N times (default 200) by random and by degenerate lines and
   records, per cut, the time, the pieces, the contacts, the time of the convex decomposition of
-  the new pieces, the largest coordinate size and the exact certificate.
+  the new pieces, the largest coordinate size and the exact certificate, for our slicer and for
+  three baselines on the same lines (CGAL's arrangement of segments and Boolean set operations,
+  both exact, and Clipper2 on integers). `--suite hole-scale` times hole elimination with both
+  kernels and PolyPartition's bridging on random holes and cheeses with up to 2^14 holes.
+  `--suite strokes [--cuts N] [--world FILE]` draws N finite strokes on cheeses whose pieces move
+  apart (Section 6, *Moving pieces*), with the certificate after every stroke.
 
 ## 11. Performance
 
-Convex decomposition performs `O(n (n_c + 1))` predicate evaluations for `n` vertices and
-`n_c` reflex vertices, so it is quadratic in the worst case (for example on combs). Hole
-elimination makes at most `h` cuts, each linear in the size of the current piece apart from
-sorting the crossings and assigning the remaining holes. In the benchmarks of version 1.2.0 the
-exact kernel is about 12 to 87 times slower than the double kernel (median 38). Figures on one
-core of a Xeon E5-2667 v3 at a fixed 3.2 GHz: a 2048-vertex star-shaped polygon takes about 10 ms
-in double precision and 0.9 s exactly; a polygon with 256 holes and about 1000 vertices about
-4 ms and 0.22 s. The running time grows quadratically in practice as well (`pd_bench --suite
-scale`): with the double kernel a 65536-vertex star-shaped polygon takes about 7.5 s, a
-65536-vertex comb about 15 s, and 16384 random holes (about 106000 vertices) about 3.3 s, while
-input validation takes about 6 s, 4 ms and 0.5 s on the same inputs.
+Figures from the paper's run of version 1.4.0, on one core of a Xeon E5-2667 v3 at a fixed 3.2 GHz.
 
-A slicer cut compares the line with each piece's bounding box and walks only the pieces it may
-cross, in time linear in their size apart from sorting the crossings. Full lines across a block
-create many pieces (200 random lines across a cheese give about ten thousand), and the time per
-cut grows with the number of pieces each line crosses.
+**Cutting.** A slicer cut compares the line with each piece's bounding box and walks only the pieces
+it may cross, in time linear in their size apart from sorting the crossings. Over 200 full lines
+across cheeses with 16 to 256 holes and other shapes, a cut took 1.3 ms in the median, including
+cuts on more than ten thousand pieces at the end of a sequence (200 random lines across a cheese
+give about ten thousand pieces), and coordinates never needed more than 350 bits. A CGAL arrangement
+of the same lines took 0.6 to 1.8 times as long, CGAL's Boolean set operations 8 to 17 times as
+long. A finite stroke on pieces that move apart (`pd_bench --suite strokes`) took 0.10 ms in the
+median and at most 5.4 ms, since it cuts only the pieces it crosses.
+
+**Hole elimination** makes at most `h` cuts, each linear in the size of the current piece apart
+from sorting the crossings and assigning the remaining holes. With the double kernel it removes
+16384 random holes (about 106000 vertices) in about 2.9 s and the 4096 holes of a cheese (about
+49000 vertices) in about 0.13 s; its time grows with slopes 1.5 to 2.1 on logarithmic axes. The
+exact kernel is 22 to 233 times slower from 64 holes on (2048 random holes in 11.5 s). Input
+validation takes about 0.5 s on the largest random-holes input.
+
+**Convex decomposition** performs `O(n (n_c + 1))` predicate evaluations for `n` vertices and
+`n_c` reflex vertices, so it is quadratic in the worst case (for example on combs). In the
+benchmarks of version 1.2.0 (`pd_bench --suite all|scale`), a 2048-vertex star-shaped polygon took
+about 10 ms in double precision and 0.9 s exactly, and the double kernel decomposed a
+65536-vertex star-shaped polygon in about 7.5 s.
 
 ## 12. Limitations
 
@@ -375,9 +404,11 @@ cut grows with the number of pieces each line crosses.
   star-shaped polygons Greene's optimal partition without Steiner points, as provided by CGAL,
   is about 10% smaller.
 - Exact results rounded to doubles can contain pieces too small to survive rounding, when
-  input vertices lie within a few units in the last place of each other.
-- The double kernel's outputs are convex up to 1e-12 radians and can differ structurally from
-  the exact outputs on degenerate data (they remain valid tilings).
+  input vertices lie within a few units in the last place of each other, and a piece can touch
+  itself after rounding when a cut passes a vertex closer than a unit in the last place (its exact
+  ring is simple; `oracle.py --rational` recognises this).
+- The double kernel's outputs can differ structurally from the exact outputs on degenerate data
+  (they remain valid tilings, and its convex pieces are convex up to 1e-12 radians).
 - After a dangling contact, the hole-free pieces of `eliminate_holes` (exact) include a weakly
   simple piece that touches itself at the contact vertex; the pipeline's convex pieces are
   simple. The double kernel uses a fallback line for dangling contacts.
@@ -389,16 +420,20 @@ cut grows with the number of pieces each line crosses.
 ## 13. Reproducing the paper's results
 
 `scripts/repro_paper.sh` rebuilds everything, runs the tests on all presets, validates the
-legacy inputs, decomposes and certifies 5000 generated polygons, checks them with an
-independent GEOS oracle, runs the floating-point census and the benchmarks against CGAL, and
-writes all tables to `build/paper-results/`. It needs GMP, CGAL and the oracle's Python
-environment (`scripts/oracle/setup_venv.sh`). Timings depend on the machine; the script
-records the processor and the frequency policy of the benchmark CPU (`PD_BENCH_CPU`, default 2)
-and warns unless its governor is `performance`. For stable timings fix the frequency first (root),
-for example `echo performance | sudo tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor`
-with turbo disabled. Step 10 runs the scaling suite (`SCALE.csv`), step 11 the cut-rule ablation
-(`ABLATION.txt`) and step 12 the slicing experiment (`SLICE.csv`, `SLICE.md`). It also records the
-double kernel with exact retry on the census inputs (`RETRY.txt`), the test count (`TESTS.txt`)
-and the degenerate set (`DEGENERATE.txt`). The fuzzing campaign (three targets, the last one for
-the slicer) is run separately with `scripts/run_fuzz.sh [SECONDS]` (clang, preset `clang-fuzz`;
-logs in `build/clang-fuzz/`).
+legacy inputs, runs exact hole elimination on 5000 generated polygons with the certificate,
+checks the hole-free pieces with the independent GEOS oracle (with the exact recheck of pieces
+that are invalid only after rounding), runs the floating-point census of hole elimination (double
+kernel and plain floating point against the exact result, the double results through the
+oracle, and the exact retry), the degenerate set, hole elimination at scale (`HOLE_SCALE.csv`),
+the cut-rule ablation (`ABLATION.txt`), the cutting experiment with its three baselines
+(`SLICE.csv`, `SLICE.md`, and Clipper2 at several integer scales, `CLIPPER_SCALE.csv`) and the
+strokes on moving pieces (`STROKES.csv`), and writes everything to `build/paper-results/`. It
+needs GMP, CGAL and the oracle's Python environment (`scripts/oracle/setup_venv.sh`). Timings
+depend on the machine; the script records the processor and the frequency policy of the
+benchmark CPU (`PD_BENCH_CPU`, default 2), samples its frequency during each benchmark, and warns
+unless its governor is `performance`. For stable timings fix the frequency first (root), for
+example `echo performance | sudo tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor` with
+turbo disabled. The convex benchmarks of earlier versions (`pd_bench --suite all|scale`) are no
+longer part of the script. The fuzzing campaign (three targets, the last one for the slicer) is
+run separately with `scripts/run_fuzz.sh [SECONDS]` (clang, preset `clang-fuzz`; logs in
+`build/clang-fuzz/`).

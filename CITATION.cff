@@ -1,8 +1,8 @@
 cff-version: 1.2.0
 message: "If you use this software, please cite it as below."
-title: "polydecomp: exact and robust decomposition of polygons with holes into convex pieces"
-version: 1.3.0
-date-released: 2026-10-16
+title: "PolyDecomp: Exact Cutting and Hole Elimination for Polygons with Holes"
+version: 1.4.0
+date-released: 2026-10-17
 license: BSD-3-Clause
 repository-code: "https://github.com/yinghui/PolyDecomp"
 authors:
@@ -12,6 +12,8 @@ authors:
     email: yinghui.zhang@northampton.ac.uk
 keywords:
   - computational geometry
+  - polygon cutting
+  - hole elimination
   - polygon decomposition
   - convex partition
   - polygons with holes

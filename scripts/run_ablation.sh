@@ -5,10 +5,11 @@
 # run_generated.sh and on random_holes with 64, 256 and 1024 holes (seeds 1 to 5).
 # Stats go to BUILD_DIR/ablation/; the summary goes to stdout. Fails if any result is not
 # certified.
-#   usage: scripts/run_ablation.sh [BUILD_DIR] [CPU]
+#   usage: scripts/run_ablation.sh [BUILD_DIR] [CPU] [STAGE]   (STAGE: both, default, or holes)
 set -euo pipefail
 b="${1:-build/gcc-release}"
 cpu="${2:-2}"
+stage="${3:-both}"
 d="${b}/ablation"
 G="${b}/generated"
 mkdir -p "${d}"
@@ -17,11 +18,11 @@ for h in 64 256 1024; do
 done
 for rule in farthest closest boundary horizontal; do
   for f in row star c cluster grid; do
-    taskset -c "${cpu}" "${b}/pd_decompose" --quiet --verify --cut-rule "${rule}" --wkt "${G}/${f}.wkt" \
+    taskset -c "${cpu}" "${b}/pd_decompose" --quiet --verify --stage "${stage}" --cut-rule "${rule}" --wkt "${G}/${f}.wkt" \
       --out /dev/null --stats "${d}/${rule}.${f}.jsonl"
   done
   for h in 64 256 1024; do
-    taskset -c "${cpu}" "${b}/pd_decompose" --quiet --verify --cut-rule "${rule}" --wkt "${d}/holes-${h}.wkt" \
+    taskset -c "${cpu}" "${b}/pd_decompose" --quiet --verify --stage "${stage}" --cut-rule "${rule}" --wkt "${d}/holes-${h}.wkt" \
       --out /dev/null --stats "${d}/${rule}.holes-${h}.jsonl"
   done
 done

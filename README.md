@@ -1,21 +1,23 @@
 # polydecomp
 
-A C++17 library that decomposes a polygon with holes into convex pieces, in two stages:
+A C++17 library for exact cutting and hole elimination of polygons with holes.
 
-1. **Hole elimination (line cut).** Repeatedly cut along a line derived from the hole geometry
-   until every piece is a simple, hole-free polygon.
-2. **Convex decomposition (chord split).** Split each simple polygon at a reflex vertex along the
-   extension of its incoming edge until every piece is convex.
+1. **Cutting along lines.** `pd::Slicer` cuts a polygon with holes along arbitrary lines, as
+   often as wanted, in exact arithmetic, for interactive cutting (for example slicing a cheese
+   with many holes in a game). Lines through vertices, along edges or repeating earlier cuts are
+   handled exactly, holes the line misses stay with their piece, pieces that move apart are cut in
+   their own frames, and coordinates stay bounded however many cuts follow
+   (`examples/slice_cheese.cpp`).
+2. **Hole elimination (line cut).** Repeatedly cut along a line derived from the hole geometry
+   until every piece is a simple, hole-free polygon (at most h cuts for h holes).
+3. **Convex decomposition (chord split, optional).** Split each simple polygon at a reflex vertex
+   along the extension of its incoming edge until every piece is convex.
 
-Both stages run on an exact rational kernel (GMP) or a fast double-precision kernel.
+Everything runs on an exact rational kernel (GMP); hole elimination and the convex decomposition
+also run on a fast double-precision kernel that decides exactly, checks its result and can rerun
+exactly.
 
-**Slicing.** `pd::Slicer` cuts a polygon with holes along arbitrary lines, as often as wanted, in
-exact arithmetic, for interactive cutting (for example slicing a cheese with many holes in a
-game). Lines through vertices, along edges or repeating earlier cuts are handled exactly, holes
-the line misses stay with their piece, coordinates stay bounded however many cuts follow, and each
-piece can be decomposed into convex pieces (`examples/slice_cheese.cpp`).
-
-Version 1.3.0. Released under the BSD 3-Clause License (see `LICENSE`); cite it as described in
+Version 1.4.0. Released under the BSD 3-Clause License (see `LICENSE`); cite it as described in
 `CITATION.cff`. Repository: <https://github.com/yinghui/PolyDecomp>.
 
 **Documentation:** the user guide (`docs/USER_GUIDE.md`) covers installation, the input class,
@@ -50,18 +52,21 @@ development files are missing. Either install them (e.g. `libstdc++-14-dev`) or 
 ## Verification and benchmarks
 
 - `scripts/oracle/setup_venv.sh` creates a Python environment with shapely/GEOS;
-  `scripts/oracle/oracle.py INPUTS.wkt PIECES.wkt [--convex]` checks results independently of the
-  library (valid pieces, inside the input, pairwise disjoint, total area, convexity), using GEOS
-  snap-rounded overlay.
+  `scripts/oracle/oracle.py INPUTS.wkt PIECES.wkt [--rational PIECES.rat] [--convex]` checks
+  results independently of the library (valid pieces, inside the input, pairwise disjoint, total
+  area, convexity), using GEOS snap-rounded overlay; with `--rational` a piece that is invalid only
+  after rounding to doubles is recognised by an exact recheck.
 - Fuzzing (clang): `cmake --preset clang-fuzz && cmake --build --preset clang-fuzz`, then run
   `build/clang-fuzz/fuzz_wkt` (arbitrary WKT text) or `build/clang-fuzz/fuzz_grid` (polygons on
   a small integer grid). On every valid input the exact result must pass the exact certificate
-  and the double pipeline (with exact retry) must succeed. `build/clang-fuzz/fuzz_slice` cuts grid
+  and the double pipeline and double hole elimination (each with exact retry) must succeed. `build/clang-fuzz/fuzz_slice` cuts grid
   polygons with the slicer, mostly through vertices, along edges and tangent to holes, and
   certifies the pieces after every cut. `scripts/run_fuzz.sh [SECONDS]` runs all three.
 - Benchmarks: `cmake --preset gcc-bench && cmake --build --preset gcc-bench` (needs CGAL),
   `build/gcc-bench/pd_bench --csv bench.csv`, `scripts/summarize_bench.py bench.csv`; the slicing
-  experiment: `pd_bench --suite slice --csv slice.csv`, `scripts/summarize_slice.py slice.csv`.
+  experiment: `pd_bench --suite slice --csv slice.csv`, `scripts/summarize_slice.py slice.csv`;
+  hole elimination at scale: `pd_bench --suite hole-scale`; strokes on moving pieces:
+  `pd_bench --suite strokes`.
 - `scripts/repro_paper.sh` regenerates every result of the accompanying paper in
   `build/paper-results/`.
 
