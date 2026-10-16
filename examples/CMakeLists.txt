@@ -2,7 +2,7 @@
 # polydecomp: see examples/consumer/CMakeLists.txt.
 set(pd_examples double_with_retry convex_and_tree)
 if(PD_WITH_GMP)
-  list(APPEND pd_examples holes_to_convex)
+  list(APPEND pd_examples holes_to_convex slice_cheese)
 endif()
 foreach(ex ${pd_examples})
   add_executable(example_${ex} ${ex}.cpp)

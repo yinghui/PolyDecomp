@@ -195,6 +195,81 @@ VerifyReport verify_partition(const PolygonWithHoles<typename K::FT>& input,
   return rep;
 }
 
+/// Certificate for pieces that may still contain holes, such as those of a Slicer. It accepts iff
+///   (1) every hole of a piece is a hole of the input (the same vertices), kept by exactly one piece,
+///       has a vertex strictly inside that piece's outer ring, and has no edge that meets an edge of
+///       that ring, and
+///   (2) the outer rings of the pieces tile the input with the kept holes filled in
+///       (verify_partition, weakly simple rings allowed if asked).
+/// Then the pieces, each its outer ring minus its holes, tile the input: by (2) the outer rings have
+/// pairwise disjoint interiors that cover the region with the kept holes filled; by (1) the boundary
+/// of a kept hole avoids its piece's outer ring and has a point inside it, so the whole hole lies
+/// inside that ring (and in no other piece), and removing it from that piece leaves a tiling of the
+/// input. Holes are matched in O(h log h) comparisons of vertex lists; the test of (1) compares the
+/// edges of each kept hole with the edges of its piece's outer ring whose boxes meet the hole's box.
+template <class K>
+VerifyReport verify_slices(const PolygonWithHoles<typename K::FT>& input,
+                           const std::vector<PolygonWithHoles<typename K::FT>>& pieces,
+                           bool weakly_simple = false)
+{
+  using FT = typename K::FT;
+  using Key = std::vector<Point<FT>>;
+  VerifyReport rep;
+  auto fail = [&](std::string msg) {
+    rep.ok = false;
+    rep.failure = std::move(msg);
+    return rep;
+  };
+  auto less_point = [](const Point<FT>& a, const Point<FT>& b) { return lex_less(a, b); };
+  auto key = [&](const Ring<FT>& r) {
+    Key v(r.begin(), r.end());
+    std::sort(v.begin(), v.end(), less_point);
+    return v;
+  };
+  auto less_key = [&](const Key& a, const Key& b) {
+    if (a.size() != b.size()) return a.size() < b.size();
+    return std::lexicographical_compare(a.begin(), a.end(), b.begin(), b.end(), less_point);
+  };
+  std::map<Key, std::size_t, decltype(less_key)> input_keys(less_key);
+  for (std::size_t j = 0; j < input.holes.size(); ++j) input_keys.emplace(key(input.holes[j]), j);
+  std::vector<bool> kept(input.holes.size(), false);
+  std::vector<Ring<FT>> outers;
+  for (std::size_t k = 0; k < pieces.size(); ++k) {
+    const PolygonWithHoles<FT>& p = pieces[k];
+    for (const Ring<FT>& h : p.holes) {
+      const auto it = h.empty() ? input_keys.end() : input_keys.find(key(h));
+      if (it == input_keys.end()) return fail("piece " + std::to_string(k) + " has a hole that is not an input hole");
+      if (kept[it->second]) return fail("input hole " + std::to_string(it->second) + " is a hole of two pieces");
+      kept[it->second] = true;
+      if (locate<K>(h.front(), p.outer) != Location::Inside)
+        return fail("a hole of piece " + std::to_string(k) + " is not inside it");
+      // No edge of the hole meets an edge of the outer ring (closed segments, exact).
+      FT x0 = h[0].x, x1 = x0, y0 = h[0].y, y1 = y0;
+      for (const auto& v : h) {
+        if (v.x < x0) x0 = v.x;
+        if (x1 < v.x) x1 = v.x;
+        if (v.y < y0) y0 = v.y;
+        if (y1 < v.y) y1 = v.y;
+      }
+      const std::size_t m = p.outer.size();
+      for (std::size_t i = 0; i < m; ++i) {
+        const Point<FT>& a = p.outer[i];
+        const Point<FT>& b = p.outer[(i + 1) % m];
+        if ((a.x < x0 && b.x < x0) || (x1 < a.x && x1 < b.x) || (a.y < y0 && b.y < y0) || (y1 < a.y && y1 < b.y))
+          continue;  // the edge's box misses the hole's box
+        for (std::size_t j = 0; j < h.size(); ++j)
+          if (segments_touch<K>(a, b, h[j], h[(j + 1) % h.size()]))
+            return fail("a hole of piece " + std::to_string(k) + " meets its outer ring");
+      }
+    }
+    outers.push_back(p.outer);
+  }
+  PolygonWithHoles<FT> filled{input.outer, {}};
+  for (std::size_t j = 0; j < input.holes.size(); ++j)
+    if (!kept[j]) filled.holes.push_back(input.holes[j]);
+  return verify_partition<K>(filled, outers, false, weakly_simple);
+}
+
 /// Necessary conditions for a floating-point result, checked in its own
 /// arithmetic: every piece is simple and counter-clockwise (exact tests on the
 /// stored coordinates), convex up to angle_tol (radians) if required, and the

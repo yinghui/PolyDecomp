@@ -27,13 +27,18 @@ struct ExactKernel {
 
   static int orient(const Point<FT>& a, const Point<FT>& b, const Point<FT>& c)
   {
+    return orient(a.x, a.y, b.x, b.y, c.x, c.y);
+  }
+  /// The same test on coordinates (the symbolic kernel uses it for points that do not depend on ε).
+  static int orient(const FT& ax, const FT& ay, const FT& bx, const FT& by, const FT& cx, const FT& cy)
+  {
     // Reused temporaries avoid an allocation per call.
     thread_local mpq_class l, r, t;
-    l = b.x - a.x;
-    t = c.y - a.y;
+    l = bx - ax;
+    t = cy - ay;
     l *= t;
-    r = b.y - a.y;
-    t = c.x - a.x;
+    r = by - ay;
+    t = cx - ax;
     r *= t;
     const int s = cmp(l, r);
     return (s > 0) - (s < 0);

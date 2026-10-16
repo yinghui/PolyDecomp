@@ -61,6 +61,12 @@ PolygonWithHoles<double> spiral_holes(int h, std::uint64_t seed);
 /// holes. Deterministic in (h, seed).
 PolygonWithHoles<double> random_holes(int h, std::uint64_t seed);
 
+/// A slice of cheese: a roughly round outer ring (64 vertices) of radius 1.5 + 1.1 sqrt(h) around the
+/// origin with h round holes (regular polygons with 8 to 16 vertices, radii in [0.25, 0.9]) at random
+/// positions at least 0.15 apart and away from the rim, coordinates rounded to 1e-5. For slicing
+/// experiments and figures. Deterministic in (h, seed).
+PolygonWithHoles<double> cheese(int h, std::uint64_t seed);
+
 /// Hand-made degenerate inputs: {name, polygon}. Each forces a contact (a cut
 /// line through vertices or along edges), a dangling contact, or a fallback of
 /// the hole-elimination stage.

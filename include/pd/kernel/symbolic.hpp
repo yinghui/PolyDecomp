@@ -18,6 +18,8 @@
 
 #include <gmpxx.h>
 
+#include <algorithm>
+#include <memory>
 #include <stdexcept>
 #include <utility>
 #include <vector>
@@ -29,76 +31,100 @@
 namespace pd {
 
 /// A rational function of ε with rational coefficients, ordered as ε -> 0+.
+///
+/// Almost every value of a computation does not depend on ε (only a split vertex and what is built
+/// from it does). A constant is therefore stored as a plain rational, and only a value that depends
+/// on ε carries its polynomials N and D, shared between copies since values are never modified.
 class EpsQ {
 public:
   using Poly = std::vector<mpq_class>;  ///< coefficient k multiplies ε^k
 
-  EpsQ() : n_{mpq_class(0)}, d_{mpq_class(1)} {}
-  EpsQ(int v) : n_{mpq_class(v)}, d_{mpq_class(1)} {}
-  EpsQ(long v) : n_{mpq_class(v)}, d_{mpq_class(1)} {}
-  EpsQ(double v) : n_{mpq_class(v)}, d_{mpq_class(1)} {}  ///< exact: doubles are dyadic
-  EpsQ(const mpq_class& v) : n_{v}, d_{mpq_class(1)} {}
+  EpsQ() = default;
+  EpsQ(int v) : c_(v) {}
+  EpsQ(long v) : c_(v) {}
+  EpsQ(double v) : c_(v) {}  ///< exact: doubles are dyadic
+  EpsQ(const mpq_class& v) : c_(v) {}
+  EpsQ(mpq_class&& v) : c_(std::move(v)) {}
 
   /// The infinitesimal ε itself.
-  static EpsQ eps()
-  {
-    EpsQ e;
-    e.n_ = {mpq_class(0), mpq_class(1)};
-    return e;
-  }
+  static EpsQ eps() { return EpsQ(Poly{mpq_class(0), mpq_class(1)}, Poly{mpq_class(1)}); }
 
   /// True if the value does not depend on ε.
-  bool is_constant() const { return n_.size() == 1 && d_.size() == 1; }
+  bool is_constant() const { return !f_; }
+  /// The value of a constant (is_constant()).
+  const mpq_class& constant() const { return c_; }
 
   /// Value at ε = 0 (the limit ε -> 0+); throws if the limit is infinite.
   mpq_class limit() const
   {
-    if (sgn(d_[0]) == 0) throw std::domain_error("EpsQ: infinite limit");
-    return n_[0] / d_[0];
+    if (!f_) return c_;
+    if (sgn(f_->d[0]) == 0) throw std::domain_error("EpsQ: infinite limit");
+    return f_->n[0] / f_->d[0];
   }
 
   /// Sign of the value for all sufficiently small ε > 0.
-  int sign() const { return low_sign(n_) * low_sign(d_); }
+  int sign() const { return f_ ? low_sign(f_->n) * low_sign(f_->d) : sgn(c_); }
 
-  friend EpsQ operator+(const EpsQ& a, const EpsQ& b) { return combine(a, b, +1); }
-  friend EpsQ operator-(const EpsQ& a, const EpsQ& b) { return combine(a, b, -1); }
+  // Constants (the common case) take fast paths on their rational values.
+  friend EpsQ operator+(const EpsQ& a, const EpsQ& b)
+  {
+    if (!a.f_ && !b.f_) return EpsQ(mpq_class(a.c_ + b.c_));
+    return combine(a, b, +1);
+  }
+  friend EpsQ operator-(const EpsQ& a, const EpsQ& b)
+  {
+    if (!a.f_ && !b.f_) return EpsQ(mpq_class(a.c_ - b.c_));
+    return combine(a, b, -1);
+  }
   friend EpsQ operator*(const EpsQ& a, const EpsQ& b)
   {
-    EpsQ r;
-    r.n_ = mul(a.n_, b.n_);
-    r.d_ = mul(a.d_, b.d_);
-    r.normalize();
-    return r;
+    if (!a.f_ && !b.f_) return EpsQ(mpq_class(a.c_ * b.c_));
+    return EpsQ(mul(a.num(), b.num()), mul(a.den(), b.den()));
   }
   friend EpsQ operator/(const EpsQ& a, const EpsQ& b)
   {
     if (b.sign() == 0) throw std::domain_error("EpsQ: division by zero");
-    EpsQ r;
-    r.n_ = mul(a.n_, b.d_);
-    r.d_ = mul(a.d_, b.n_);
-    r.normalize();
-    return r;
+    if (!a.f_ && !b.f_) return EpsQ(mpq_class(a.c_ / b.c_));
+    return EpsQ(mul(a.num(), b.den()), mul(a.den(), b.num()));
   }
   EpsQ operator-() const
   {
-    EpsQ r = *this;
-    for (mpq_class& c : r.n_) c = -c;
-    return r;
+    if (!f_) return EpsQ(mpq_class(-c_));
+    Poly n = f_->n;
+    for (mpq_class& c : n) c = -c;
+    return EpsQ(std::move(n), f_->d);
   }
   EpsQ& operator+=(const EpsQ& b) { return *this = *this + b; }
   EpsQ& operator-=(const EpsQ& b) { return *this = *this - b; }
   EpsQ& operator*=(const EpsQ& b) { return *this = *this * b; }
   EpsQ& operator/=(const EpsQ& b) { return *this = *this / b; }
 
-  friend bool operator==(const EpsQ& a, const EpsQ& b) { return (a - b).sign() == 0; }
+  friend bool operator==(const EpsQ& a, const EpsQ& b)
+  {
+    if (!a.f_ && !b.f_) return a.c_ == b.c_;
+    return (a - b).sign() == 0;
+  }
   friend bool operator!=(const EpsQ& a, const EpsQ& b) { return !(a == b); }
-  friend bool operator<(const EpsQ& a, const EpsQ& b) { return (a - b).sign() < 0; }
+  friend bool operator<(const EpsQ& a, const EpsQ& b)
+  {
+    if (!a.f_ && !b.f_) return a.c_ < b.c_;
+    return (a - b).sign() < 0;
+  }
   friend bool operator>(const EpsQ& a, const EpsQ& b) { return b < a; }
   friend bool operator<=(const EpsQ& a, const EpsQ& b) { return !(b < a); }
   friend bool operator>=(const EpsQ& a, const EpsQ& b) { return !(a < b); }
 
 private:
-  Poly n_, d_;  // d_ is never the zero polynomial; both have at least one coefficient
+  struct Fn {
+    Poly n, d;  // N and D: D is never the zero polynomial, and N/D is never a constant
+  };
+  mpq_class c_;                  // the value of a constant
+  std::shared_ptr<const Fn> f_;  // N/D of a value that depends on ε, empty for a constant
+
+  /// The value N/D, normalized; a constant is stored as a constant.
+  EpsQ(Poly n, Poly d) { normalize(std::move(n), std::move(d)); }
+  Poly num() const { return f_ ? f_->n : Poly{c_}; }
+  Poly den() const { return f_ ? f_->d : Poly{mpq_class(1)}; }
 
   static int low_sign(const Poly& p)
   {
@@ -124,42 +150,82 @@ private:
   }
   static EpsQ combine(const EpsQ& a, const EpsQ& b, int s)
   {
-    EpsQ r;
-    if (a.d_.size() == 1 && b.d_.size() == 1 && a.d_[0] == b.d_[0]) {  // common denominator
-      r.n_ = add(a.n_, b.n_, s);
-      r.d_ = a.d_;
-    } else {
-      r.n_ = add(mul(a.n_, b.d_), mul(b.n_, a.d_), s);
-      r.d_ = mul(a.d_, b.d_);
-    }
-    r.normalize();
-    return r;
+    Poly ad = a.den(), bd = b.den();
+    if (ad.size() == 1 && bd.size() == 1 && ad[0] == bd[0])  // common denominator
+      return EpsQ(add(a.num(), b.num(), s), std::move(ad));
+    return EpsQ(add(mul(a.num(), bd), mul(b.num(), ad), s), mul(ad, bd));
   }
-  /// Strips high-order zeros, cancels a common power of ε, and makes a constant
-  /// denominator equal to 1, so that constants stay constants.
-  void normalize()
+  /// Removes high-order zero coefficients (the zero polynomial becomes empty).
+  static void trim(Poly& p)
   {
-    auto strip = [](Poly& p) {
-      while (p.size() > 1 && sgn(p.back()) == 0) p.pop_back();
-    };
-    strip(n_);
-    strip(d_);
-    if (low_sign(n_) == 0) {  // zero
-      n_ = {mpq_class(0)};
-      d_ = {mpq_class(1)};
+    while (!p.empty() && sgn(p.back()) == 0) p.pop_back();
+  }
+  /// Remainder of a divided by b (b trimmed and not zero); trimmed.
+  static Poly remainder(Poly a, const Poly& b)
+  {
+    trim(a);
+    while (a.size() >= b.size()) {
+      const mpq_class f = a.back() / b.back();
+      const std::size_t s = a.size() - b.size();
+      for (std::size_t j = 0; j < b.size(); ++j) a[s + j] -= f * b[j];
+      a.pop_back();  // the leading coefficient is now zero
+      trim(a);
+    }
+    return a;
+  }
+  /// The quotient a / b of a polynomial a that b divides (b trimmed and not zero).
+  static Poly quotient(Poly a, const Poly& b)
+  {
+    Poly q(a.size() - b.size() + 1, mpq_class(0));
+    for (std::size_t i = q.size(); i-- > 0;) {
+      q[i] = a[i + b.size() - 1] / b.back();
+      for (std::size_t j = 0; j < b.size(); ++j) a[i + j] -= q[i] * b[j];
+    }
+    return q;
+  }
+  /// A greatest common divisor of two nonzero trimmed polynomials (Euclid).
+  static Poly gcd(Poly a, Poly b)
+  {
+    while (!b.empty()) {
+      Poly r = remainder(std::move(a), b);
+      a = std::move(b);
+      b = std::move(r);
+    }
+    return a;
+  }
+  /// Brings N/D to lowest terms (common powers of ε and the polynomial gcd cancelled, the lowest
+  /// nonzero coefficient of D equal to 1), so that, as with mpq_class, a value has one representation
+  /// whichever way it was computed; a value that does not depend on ε becomes a constant.
+  void normalize(Poly n, Poly d)
+  {
+    trim(n);
+    trim(d);
+    if (n.empty()) return;  // zero: c_ is 0
+    std::size_t k = 0;
+    while (sgn(n[k]) == 0 && sgn(d[k]) == 0) ++k;
+    if (k > 0) {
+      n.erase(n.begin(), n.begin() + static_cast<std::ptrdiff_t>(k));
+      d.erase(d.begin(), d.begin() + static_cast<std::ptrdiff_t>(k));
+    }
+    if (n.size() > 1 && d.size() > 1) {
+      const Poly g = gcd(n, d);
+      if (g.size() > 1) {
+        n = quotient(std::move(n), g);
+        d = quotient(std::move(d), g);
+      }
+    }
+    std::size_t low = 0;
+    while (sgn(d[low]) == 0) ++low;
+    if (d[low] != 1) {
+      const mpq_class inv = 1 / d[low];
+      for (mpq_class& c : n) c *= inv;
+      for (mpq_class& c : d) c *= inv;
+    }
+    if (n.size() == 1 && d.size() == 1) {
+      c_ = std::move(n[0]);
       return;
     }
-    std::size_t k = 0;
-    while (k < n_.size() && k < d_.size() && sgn(n_[k]) == 0 && sgn(d_[k]) == 0) ++k;
-    if (k > 0) {
-      n_.erase(n_.begin(), n_.begin() + static_cast<std::ptrdiff_t>(k));
-      d_.erase(d_.begin(), d_.begin() + static_cast<std::ptrdiff_t>(k));
-    }
-    if (d_.size() == 1 && d_[0] != 1) {
-      const mpq_class inv = 1 / d_[0];
-      for (mpq_class& c : n_) c *= inv;
-      d_ = {mpq_class(1)};
-    }
+    f_ = std::make_shared<const Fn>(Fn{std::move(n), std::move(d)});
   }
 };
 
@@ -188,6 +254,10 @@ struct SymbolicKernel {
 
   static int orient(const Point<FT>& a, const Point<FT>& b, const Point<FT>& c)
   {
+    if (a.x.is_constant() && a.y.is_constant() && b.x.is_constant() && b.y.is_constant() &&
+        c.x.is_constant() && c.y.is_constant())
+      return ExactKernel::orient(a.x.constant(), a.y.constant(), b.x.constant(), b.y.constant(),
+                                 c.x.constant(), c.y.constant());
     return ((b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x)).sign();
   }
   static FT from_double(double v) { return FT(v); }

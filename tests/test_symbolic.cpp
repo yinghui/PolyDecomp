@@ -32,6 +32,26 @@ TEST_CASE("EpsQ: arithmetic and the limit order")
   CHECK_THROWS((one / e).limit());
 }
 
+TEST_CASE("EpsQ: values are kept in lowest terms")
+{
+  const EpsQ e = EpsQ::eps();
+  const EpsQ one(1), two(2);
+  const EpsQ q = (one + e) / (one + e);
+  CHECK(q.is_constant());
+  CHECK(q.constant() == 1);
+  // (e + 1)(e + 2) / (e + 1) = e + 2: the common factor cancels, so the difference is a constant.
+  const EpsQ r = (e * e + 3 * e + two) / (e + one);
+  CHECK(r == e + two);
+  CHECK((r - e).is_constant());
+  CHECK((r - e).constant() == 2);
+  // A point on the line through c = (1 + e, 0) and (0, 1), at x = 1/2, computed along two paths.
+  const EpsQ cx = one + e, t = (cx - mpq_class(1, 2)) / cx;  // y = t on that line
+  const EpsQ y1 = t, y2 = one - mpq_class(1, 2) / cx;
+  CHECK(y1 == y2);
+  CHECK((y1 - y2).is_constant());
+  CHECK((y1 * cx - (cx - mpq_class(1, 2))).is_constant());
+}
+
 TEST_CASE("symbolic kernel: orientation with a perturbed point")
 {
   using K = pd::SymbolicKernel;

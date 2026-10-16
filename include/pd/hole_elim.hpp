@@ -160,6 +160,9 @@ inline void drop_repeats(std::vector<Corner1>& piece)
 }
 
 template <class K>
+struct SliceState;  // the persistent state of pd::Slicer (slice.hpp)
+
+template <class K>
 class HoleEliminator {
 public:
   using FT = typename K::FT;
@@ -172,6 +175,9 @@ public:
   void run(PolygonWithHoles<FT> in);
 
 private:
+  template <class>
+  friend struct SliceState;
+
   struct Cut {
     Point<FT> q, d;
     CutFallback fallback = CutFallback::None;
@@ -391,7 +397,9 @@ private:
 
   Cut choose_cut(const Work& w) const;
   Point<FT> vertex_free_direction(const Work& w, const Point<FT>& q, Point<FT> base) const;
+  bool init(PolygonWithHoles<FT> in, Work& root);
   bool cut_node(Work& w, std::vector<Work>& stack);
+  bool cut_along(Work& w, const Cut& cut, std::vector<Work>& stack, bool require_pierce);
   bool trace_side(int sign, std::uint32_t line_id, const Point<FT>& q, const Point<FT>& q2,
                   const std::vector<Crossing>& xs, const std::vector<std::size_t>& order,
                   const std::vector<std::size_t>& ring_next, const std::vector<std::size_t>& ring_prev,
@@ -613,7 +621,15 @@ bool HoleEliminator<K>::trace_side(int sign, std::uint32_t line_id, const Point<
 template <class K>
 bool HoleEliminator<K>::cut_node(Work& w, std::vector<Work>& stack)
 {
-  const Cut cut = choose_cut(w);
+  return cut_along(w, choose_cut(w), stack, true);
+}
+
+/// Cuts the node w along the line q + t d of `cut` and pushes its pieces on `stack` (in reverse
+/// order). With require_pierce (hole elimination) the line must cross a hole; otherwise (the
+/// slicer) any line is accepted, and a line that does not meet the node pushes w unchanged.
+template <class K>
+bool HoleEliminator<K>::cut_along(Work& w, const Cut& cut, std::vector<Work>& stack, bool require_pierce)
+{
   const Point<FT> q2{cut.q.x + cut.d.x, cut.q.y + cut.d.y};
   const auto line_id = static_cast<std::uint32_t>(lines_.size());
   lines_.push_back({cut.q, cut.d});
@@ -736,7 +752,12 @@ bool HoleEliminator<K>::cut_node(Work& w, std::vector<Work>& stack)
     if (!trace_side(sign, line_id, cut.q, q2, xs, order, ring_next, ring_prev, w, pieces)) return false;
     if (sign > 0) n_left = pieces.size();
   }
-  if (pierced.empty()) return fail(broken_, "a cut pierces no hole");
+  if (pieces.empty()) {  // the line does not meet the node: nothing to cut
+    if (require_pierce) return fail(broken_, "a cut pierces no hole");
+    stack.push_back(std::move(w));
+    return true;
+  }
+  if (require_pierce && pierced.empty()) return fail(broken_, "a cut pierces no hole");
 
   auto piece_ring = [&](std::size_t c) {
     Ring<FT> r;
@@ -803,15 +824,44 @@ bool HoleEliminator<K>::cut_node(Work& w, std::vector<Work>& stack)
 template <class K>
 void HoleEliminator<K>::run(PolygonWithHoles<FT> in)
 {
+  Work root;
+  if (!init(std::move(in), root)) return;
+  std::vector<Work> stack;
+  stack.push_back(std::move(root));
+  while (!stack.empty()) {
+    Work w = std::move(stack.back());
+    stack.pop_back();
+    out_.stats.max_depth = std::max(out_.stats.max_depth, w.depth);
+    if (w.holes.empty()) {
+      std::vector<std::uint32_t> ids;
+      ids.reserve(w.outer.size());
+      for (const Corner1& c : w.outer) ids.push_back(c.v);
+      if (w.node >= 0) out_.tree[static_cast<std::size_t>(w.node)].leaf = static_cast<int>(out_.leaves.size());
+      out_.leaves.push_back(std::move(ids));
+      continue;
+    }
+    if (out_.stats.cuts >= out_.stats.holes) {
+      fail(broken_, "more cuts than holes");
+      return;
+    }
+    if (!cut_node(w, stack)) return;
+  }
+}
+
+/// Validates the input (if asked), sets up the pool, the supporting lines and the hole tables, and
+/// returns the whole input as the node `root`. False, with out_.diag set, for an invalid input.
+template <class K>
+bool HoleEliminator<K>::init(PolygonWithHoles<FT> in, Work& root)
+{
   if (opt_.validate_input) {
     ValidationReport rep = validate<K>(in);
     if (!rep.ok()) {
       out_.diag = {Status::InvalidInput, "input is not in the supported class", std::move(rep.issues)};
-      return;
+      return false;
     }
   } else if (in.outer.size() < 3) {
     out_.diag = {Status::InvalidInput, "outer ring has fewer than 3 vertices", {}};
-    return;
+    return false;
   }
   make_ccw<K>(in.outer);
   for (const Point<FT>& v : in.outer)
@@ -841,7 +891,8 @@ void HoleEliminator<K>::run(PolygonWithHoles<FT> in)
   out_.stats.holes = in.holes.size();
   out_.stats.symbolic = is_symbolic_kernel<K>::value;
 
-  Work root;
+  root.outer.clear();
+  root.holes.clear();
   for (std::uint32_t k = 0; k < in.outer.size(); ++k) root.outer.push_back({outer_off + k, outer_off + k});
   for (std::size_t h = 0; h < in.holes.size(); ++h) root.holes.push_back(static_cast<int>(h));
   root.node = opt_.keep_tree ? 0 : -1;
@@ -850,27 +901,7 @@ void HoleEliminator<K>::run(PolygonWithHoles<FT> in)
     out_.tree.emplace_back();
     out_.tree[0].holes = root.holes;
   }
-
-  std::vector<Work> stack;
-  stack.push_back(std::move(root));
-  while (!stack.empty()) {
-    Work w = std::move(stack.back());
-    stack.pop_back();
-    out_.stats.max_depth = std::max(out_.stats.max_depth, w.depth);
-    if (w.holes.empty()) {
-      std::vector<std::uint32_t> ids;
-      ids.reserve(w.outer.size());
-      for (const Corner1& c : w.outer) ids.push_back(c.v);
-      if (w.node >= 0) out_.tree[static_cast<std::size_t>(w.node)].leaf = static_cast<int>(out_.leaves.size());
-      out_.leaves.push_back(std::move(ids));
-      continue;
-    }
-    if (out_.stats.cuts >= out_.stats.holes) {
-      fail(broken_, "more cuts than holes");
-      return;
-    }
-    if (!cut_node(w, stack)) return;
-  }
+  return true;
 }
 
 /// Runs the eliminator, without the symbolic rerun.

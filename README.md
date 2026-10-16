@@ -9,7 +9,13 @@ A C++17 library that decomposes a polygon with holes into convex pieces, in two 
 
 Both stages run on an exact rational kernel (GMP) or a fast double-precision kernel.
 
-Version 1.2.0. Released under the BSD 3-Clause License (see `LICENSE`); cite it as described in
+**Slicing.** `pd::Slicer` cuts a polygon with holes along arbitrary lines, as often as wanted, in
+exact arithmetic, for interactive cutting (for example slicing a cheese with many holes in a
+game). Lines through vertices, along edges or repeating earlier cuts are handled exactly, holes
+the line misses stay with their piece, coordinates stay bounded however many cuts follow, and each
+piece can be decomposed into convex pieces (`examples/slice_cheese.cpp`).
+
+Version 1.3.0. Released under the BSD 3-Clause License (see `LICENSE`); cite it as described in
 `CITATION.cff`. Repository: <https://github.com/yinghui/PolyDecomp>.
 
 **Documentation:** the user guide (`docs/USER_GUIDE.md`) covers installation, the input class,
@@ -50,9 +56,12 @@ development files are missing. Either install them (e.g. `libstdc++-14-dev`) or 
 - Fuzzing (clang): `cmake --preset clang-fuzz && cmake --build --preset clang-fuzz`, then run
   `build/clang-fuzz/fuzz_wkt` (arbitrary WKT text) or `build/clang-fuzz/fuzz_grid` (polygons on
   a small integer grid). On every valid input the exact result must pass the exact certificate
-  and the double pipeline (with exact retry) must succeed.
+  and the double pipeline (with exact retry) must succeed. `build/clang-fuzz/fuzz_slice` cuts grid
+  polygons with the slicer, mostly through vertices, along edges and tangent to holes, and
+  certifies the pieces after every cut. `scripts/run_fuzz.sh [SECONDS]` runs all three.
 - Benchmarks: `cmake --preset gcc-bench && cmake --build --preset gcc-bench` (needs CGAL),
-  `build/gcc-bench/pd_bench --csv bench.csv`, `scripts/summarize_bench.py bench.csv`.
+  `build/gcc-bench/pd_bench --csv bench.csv`, `scripts/summarize_bench.py bench.csv`; the slicing
+  experiment: `pd_bench --suite slice --csv slice.csv`, `scripts/summarize_slice.py slice.csv`.
 - `scripts/repro_paper.sh` regenerates every result of the accompanying paper in
   `build/paper-results/`.
 
@@ -61,3 +70,5 @@ development files are missing. Either install them (e.g. `libstdc++-14-dev`) or 
 - `tests/third_party/doctest.h`: doctest 2.4.9 (MIT license), used only by the test suite.
 - `third_party/polypartition/`: PolyPartition by Ivan Fratrić, commit `b000a4a` (MIT license),
   compiled only into `pd_bench` as a baseline. Not part of the library and not installed.
+- `third_party/clipper2/`: Clipper2 2.0.1 by Angus Johnson (Boost Software License 1.0), compiled
+  only into `pd_bench` as a baseline for cutting. Not part of the library and not installed.

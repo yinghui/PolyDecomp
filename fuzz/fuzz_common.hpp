@@ -5,8 +5,12 @@
 // must succeed and pass the exact certificate, and the double pipeline with
 // RetryExact must succeed. Any violation aborts (a finding for libFuzzer).
 
+#include <cmath>
+#include <cstddef>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <string>
 
 #include "pd/kernel/double.hpp"
 #include "pd/kernel/exact.hpp"
@@ -20,6 +24,46 @@ namespace pd_fuzz {
 {
   std::fprintf(stderr, "FUZZ FINDING: %s: %s\n", what, detail.c_str());
   std::abort();
+}
+
+/// Reads the fuzzer's bytes in order; past the end it yields zeros.
+struct Reader {
+  const std::uint8_t* d;
+  std::size_t n, i = 0;
+  bool more() const { return i < n; }
+  std::uint8_t next() { return i < n ? d[i++] : 0; }
+};
+
+/// A star-shaped ring on the integer grid (format in fuzz_grid.cpp): a centre byte
+/// (x = low 4 bits, y = high 4 bits, on a 4x grid), a vertex-count byte (3..14), and one
+/// byte per vertex (angle step = low 4 bits + 1 in units of 1/64 turn, radius = high 4
+/// bits + 1).
+inline pd::Ring<double> grid_ring(Reader& in, double scale, double cx0, double cy0)
+{
+  const std::uint8_t c = in.next();
+  const double cx = cx0 + (c & 15) * scale / 4, cy = cy0 + (c >> 4) * scale / 4;
+  const int k = 3 + in.next() % 12;
+  pd::Ring<double> r;
+  int angle = 0;
+  for (int j = 0; j < k && angle < 64; ++j) {
+    const std::uint8_t b = in.next();
+    const double rad = ((b >> 4) + 1) * scale / 4;
+    const double a = 6.283185307179586 * angle / 64;
+    // Round to the grid: exact integer coordinates.
+    r.push_back({std::round(cx + rad * std::cos(a)), std::round(cy + rad * std::sin(a))});
+    angle += (b & 15) + 1;
+  }
+  return r;
+}
+
+/// A polygon with up to four holes from the bytes (byte 0: number of holes).
+inline pd::PolygonWithHoles<double> grid_polygon(Reader& in)
+{
+  const int holes = in.next() % 5;
+  pd::PolygonWithHoles<double> p;
+  p.outer = grid_ring(in, 16, 64, 64);
+  for (int h = 0; h < holes && in.more(); ++h) p.holes.push_back(grid_ring(in, 2, 40, 40));
+  return p;
 }
 
 inline void check_polygon(const pd::PolygonWithHoles<double>& p)

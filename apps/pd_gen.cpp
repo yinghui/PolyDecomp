@@ -8,6 +8,7 @@
 //   pd_gen --comb TEETH [--out FILE]
 //   pd_gen --star N [--seed S] [--out FILE]          (random star-shaped polygon, n vertices)
 //   pd_gen --random-holes H [--seed S] [--out FILE]  (H random holes in a grid of cells)
+//   pd_gen --cheese H [--seed S] [--out FILE]        (a slice of cheese with H round holes)
 //   pd_gen --degenerate [--out FILE]
 //
 // Case i of a family uses seed S + i, so any case can be regenerated alone.
@@ -29,6 +30,7 @@ int usage()
                "       pd_gen --comb TEETH [--out FILE]\n"
                "       pd_gen --star N [--seed S] [--out FILE]\n"
                "       pd_gen --random-holes H [--seed S] [--out FILE]\n"
+               "       pd_gen --cheese H [--seed S] [--out FILE]\n"
                "       pd_gen --degenerate [--out FILE]\n";
   return 2;
 }
@@ -38,7 +40,7 @@ int usage()
 int main(int argc, char** argv)
 {
   std::string family, out_path;
-  long count = 1, teeth = 0, star = 0, holes = 0;
+  long count = 1, teeth = 0, star = 0, holes = 0, cheese = -1;
   std::uint64_t seed = 1;
   bool degenerate = false;
   try {
@@ -52,10 +54,12 @@ int main(int argc, char** argv)
       else if (a == "--comb" && v) teeth = std::stol(argv[++i]);
       else if (a == "--star" && v) star = std::stol(argv[++i]);
       else if (a == "--random-holes" && v) holes = std::stol(argv[++i]);
+      else if (a == "--cheese" && v) cheese = std::stol(argv[++i]);
       else if (a == "--degenerate") degenerate = true;
       else return usage();
     }
-    if (int(!family.empty()) + int(teeth > 0) + int(star > 0) + int(holes > 0) + int(degenerate) != 1 ||
+    if (int(!family.empty()) + int(teeth > 0) + int(star > 0) + int(holes > 0) + int(cheese >= 0) +
+            int(degenerate) != 1 ||
         count < 1)
       return usage();
 
@@ -74,6 +78,9 @@ int main(int argc, char** argv)
       os << '\n';
     } else if (holes > 0) {
       pd::write_wkt(os, pd::gen::random_holes(static_cast<int>(holes), seed));
+      os << '\n';
+    } else if (cheese >= 0) {
+      pd::write_wkt(os, pd::gen::cheese(static_cast<int>(cheese), seed));
       os << '\n';
     } else if (degenerate) {
       for (const auto& d : pd::gen::degenerate_set()) {

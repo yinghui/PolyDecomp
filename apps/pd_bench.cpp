@@ -4,8 +4,8 @@
 // Hertel-Mehlhorn partition, and of CGAL's convex decompositions when built
 // with PD_WITH_CGAL.
 //
-//   pd_bench [--suite simple|holes|all|scale] [--repeats R] [--csv FILE] [--quick]
-//            [--budget-ms T]
+//   pd_bench [--suite simple|holes|all|scale|slice|clipper-scale] [--repeats R] [--csv FILE] [--quick]
+//            [--budget-ms T] [--cuts N] [--baseline-budget-s S]
 //
 // Every (input, method) pair gives one CSV row:
 //   suite,input,n,holes,reflex,lower_bound,method,status,pieces,median_ms,certified
@@ -25,6 +25,35 @@
 // method that exceeded it get no row. The scale suite also times input
 // validation, which decompose() performs by default: validate-double and
 // validate-exact (pieces 0).
+//
+// The slice suite (not part of "all") cuts shapes with pd::Slicer, N cuts per sequence (default
+// 200): cheese with 16, 64 and 256 holes, random_holes with 64 holes and the bundled sample polygon,
+// each with the sequences random (lines through two random points of the bounding box), axis
+// (alternately vertical and horizontal lines through random input vertices), vertex (lines through
+// two random input vertices), repeat (every other cut repeats a random earlier line) and, for the
+// cheese, graze (the tangent at a random vertex of a random hole, through that vertex and parallel
+// to the chord of its neighbours). One row per cut:
+//   shape,n,holes,method,sequence,cut,pieces,cut_pieces,vertex_contacts,edge_contacts,dangles,
+//   symbolic,cut_ms,convex_ms,convex_pieces,max_bits,certified,tiny,area_err,split_pieces
+// cut_ms times the cut alone, convex_ms the convex decomposition of the pieces it created, and
+// certified is the exact certificate (verify_slices) of all pieces after the cut.
+// The same lines then cut the shape with two baselines (column method): clipper2, Clipper2's
+// Clipper64 on the shape scaled by a power of two to 64-bit integers below 2^40 (vendored), and,
+// with CGAL, cgal-boolean, CGAL's Boolean set operations on Epeck with segment traits. Both cut a
+// piece by computing piece ∩ H and piece − H for the half-plane H left of the line (a large
+// rectangle clipped by the line) and skip pieces whose bounding box lies on one side. For clipper2,
+// certified checks the pieces against Clipper2's own rounded input after the first and the last
+// cut, tiny counts
+// pieces with less than 1e-9 of the input's area, and area_err is the relative difference between
+// the pieces' total area and that input's (exact, in integers). cgal-boolean stops once its cut
+// times add up to the budget (--baseline-budget-s, default 120 s); its lazy numbers are evaluated
+// only after the last cut (certified, max_bits, tiny, and split_pieces, the pieces counted as the
+// slicer reports them: a hole touching the outer ring merged into it, two regions touching at a
+// point split; see CgalSlicer::exact_pieces).
+//   ...,certified,tiny,area_err,split_pieces
+// The clipper-scale suite cuts cheese with 16 and 64 holes 60 times per sequence with Clipper2 at
+// the scales 2^20, 2^26, 2^32, 2^40 and 2^50, against the slicer's piece count:
+//   shape,sequence,cuts,bits,exact_pieces,pieces,tiny,area_err
 //
 // Methods: ours-exact / ours-double (the full pipeline, exact or double
 // arithmetic; the double run retries exactly on a numerical failure),
@@ -47,9 +76,12 @@
 #include <iostream>
 #include <list>
 #include <map>
+#include <random>
 #include <set>
+#include <sstream>
 #include <string>
 #include <stdexcept>
+#include <tuple>
 #include <unordered_map>
 #include <vector>
 
@@ -59,11 +91,14 @@
 #include "pd/kernel/double.hpp"
 #include "pd/kernel/exact.hpp"
 #include "pd/pipeline.hpp"
+#include "pd/slice.hpp"
 #include "pd/verify.hpp"
 
+#include "clipper2/clipper.engine.h"
 #include "polypartition.h"
 
 #ifdef PD_HAVE_CGAL
+#include <CGAL/Boolean_set_operations_2.h>
 #include <CGAL/Exact_predicates_exact_constructions_kernel.h>
 #include <CGAL/Exact_predicates_inexact_constructions_kernel.h>
 #include <CGAL/Partition_traits_2.h>
@@ -427,9 +462,572 @@ std::vector<Input> scale_inputs()
 
 int usage()
 {
-  std::cerr << "usage: pd_bench [--suite simple|holes|all|scale] [--repeats R] [--csv FILE] [--quick]\n"
-               "                [--budget-ms T]\n";
+  std::cerr << "usage: pd_bench [--suite simple|holes|all|scale|slice|clipper-scale] [--repeats R] [--csv FILE] [--quick]\n"
+               "                [--budget-ms T] [--cuts N] [--baseline-budget-s S]\n";
   return 2;
+}
+
+/// Uniform in [0, 1) from the raw 64-bit output, the same on every platform.
+double unit(std::mt19937_64& g) { return static_cast<double>(g() >> 11) * 0x1.0p-53; }
+
+using Q = pd::Point<mpq_class>;
+struct SliceLine {
+  Q a, b;  ///< the cut is the line through a and b
+};
+
+/// The seeded cut sequence `seq` for a shape (see the file comment).
+std::vector<SliceLine> slice_lines(const std::string& name, const std::string& seq,
+                                   const pd::PolygonWithHoles<double>& shape, int cuts)
+{
+  auto exact = [](const pd::Point<double>& p) { return Q{mpq_class(p.x), mpq_class(p.y)}; };
+  std::vector<pd::Point<double>> verts(shape.outer.begin(), shape.outer.end());
+  for (const auto& h : shape.holes) verts.insert(verts.end(), h.begin(), h.end());
+  double x0 = verts[0].x, x1 = x0, y0 = verts[0].y, y1 = y0;
+  for (const auto& v : verts) {
+    x0 = std::min(x0, v.x), x1 = std::max(x1, v.x), y0 = std::min(y0, v.y), y1 = std::max(y1, v.y);
+  }
+  std::mt19937_64 g(std::hash<std::string>{}(name + "/" + seq) & 0xffffffffu);
+  std::vector<SliceLine> done;
+  for (int k = 0; k < cuts; ++k) {
+    Q a, b;
+    auto random_point = [&]() {
+      return pd::Point<double>{x0 + (x1 - x0) * (unit(g) * 1.1 - 0.05), y0 + (y1 - y0) * (unit(g) * 1.1 - 0.05)};
+    };
+    auto vertex = [&]() { return verts[static_cast<std::size_t>(unit(g) * verts.size())]; };
+    if (seq == "random" || (seq == "repeat" && (k % 2 == 0 || done.empty()))) {
+      a = exact(random_point());
+      do b = exact(random_point()); while (b == a);
+    } else if (seq == "repeat") {
+      const SliceLine& l = done[static_cast<std::size_t>(unit(g) * done.size())];
+      a = l.a, b = l.b;
+    } else if (seq == "axis") {
+      const auto v = vertex();
+      a = exact(v);
+      b = (k % 2 == 0) ? exact({v.x, v.y + 1}) : exact({v.x + 1, v.y});
+    } else if (seq == "vertex") {
+      a = exact(vertex());
+      do b = exact(vertex()); while (b == a);
+    } else {  // graze: tangent at a vertex of a (convex, regular) cheese hole
+      const auto& h = shape.holes[static_cast<std::size_t>(unit(g) * shape.holes.size())];
+      const std::size_t m = h.size(), j = static_cast<std::size_t>(unit(g) * m);
+      const auto &v = h[j], &vp = h[(j + m - 1) % m], &vn = h[(j + 1) % m];
+      a = exact(v);
+      b = Q{a.x + mpq_class(vn.x) - mpq_class(vp.x), a.y + mpq_class(vn.y) - mpq_class(vp.y)};
+    }
+    done.push_back({a, b});
+  }
+  return done;
+}
+
+/// One CSV row of the slice suite; empty optional fields are written as empty cells.
+struct SliceRow {
+  std::string shape, method, seq;
+  std::size_t n = 0, holes = 0;
+  int cut = 0;
+  std::size_t pieces = 0, cut_pieces = 0;
+  std::string vertex_contacts, edge_contacts, dangles, symbolic, convex_ms, convex_pieces, max_bits,
+      certified, tiny, area_err, split_pieces;
+  double cut_ms = 0;
+};
+void write_row(std::ostream& csv, const SliceRow& r)
+{
+  csv << r.shape << ',' << r.n << ',' << r.holes << ',' << r.method << ',' << r.seq << ',' << r.cut << ','
+      << r.pieces << ',' << r.cut_pieces << ',' << r.vertex_contacts << ',' << r.edge_contacts << ','
+      << r.dangles << ',' << r.symbolic << ',' << r.cut_ms << ',' << r.convex_ms << ',' << r.convex_pieces << ','
+      << r.max_bits << ',' << r.certified << ',' << r.tiny << ',' << r.area_err << ',' << r.split_pieces << '\n';
+}
+
+__extension__ typedef __int128 i128;  // exact areas of 64-bit integer polygons
+
+/// Pieces whose area is below 1e-9 times the shape's area (slivers).
+constexpr double kTiny = 1e-9;
+
+double area_of(const pd::PolygonWithHoles<double>& p)
+{
+  double a = std::abs(pd::signed_area2(p.outer));
+  for (const auto& h : p.holes) a -= std::abs(pd::signed_area2(h));
+  return a / 2;
+}
+
+/// Cutting with Clipper2 (vendored): the shape is scaled by a power of two and rounded to 64-bit
+/// integers once, and every cut computes piece ∩ H and piece − H for the half-plane H left of the line,
+/// a large rectangle clipped by the line with its two corners on the line rounded once.
+struct ClipperSlicer {
+  using P64 = Clipper2Lib::Point64;
+  using Piece = Clipper2Lib::Paths64;  ///< outer ring first, then the holes
+  double scale = 1;
+  std::vector<Piece> pieces;
+  std::vector<Clipper2Lib::Rect64> boxes;
+  double bx0 = 0, by0 = 0, bx1 = 0, by1 = 0;  // the rectangle that H is cut from
+
+  P64 pt(double x, double y) const { return P64(std::llround(x * scale), std::llround(y * scale)); }
+  Clipper2Lib::Path64 path(const pd::Ring<double>& r, bool positive) const
+  {
+    Clipper2Lib::Path64 p;
+    for (const auto& v : r) p.push_back(pt(v.x, v.y));
+    if ((area2(p) > 0) != positive) std::reverse(p.begin(), p.end());
+    return p;
+  }
+  static i128 area2(const Clipper2Lib::Path64& p)
+  {
+    i128 a = 0;
+    for (std::size_t i = 0, j = p.size() - 1; i < p.size(); j = i++)
+      a += static_cast<i128>(p[j].x) * p[i].y - static_cast<i128>(p[i].x) * p[j].y;
+    return a;
+  }
+  static i128 area2(const Piece& p)
+  {
+    i128 a = 0;
+    for (const auto& r : p) a += area2(r);  // holes are negative
+    return a;
+  }
+  explicit ClipperSlicer(const pd::PolygonWithHoles<double>& s, int bits = 40)
+  {
+    double m = 0;
+    bx0 = bx1 = s.outer[0].x, by0 = by1 = s.outer[0].y;
+    for (const auto& v : s.outer) {
+      m = std::max({m, std::abs(v.x), std::abs(v.y)});
+      bx0 = std::min(bx0, v.x), bx1 = std::max(bx1, v.x), by0 = std::min(by0, v.y), by1 = std::max(by1, v.y);
+    }
+    const double w = std::max(bx1 - bx0, by1 - by0);
+    bx0 -= w, by0 -= w, bx1 += w, by1 += w;
+    m = std::max({m, std::abs(bx0), std::abs(bx1), std::abs(by0), std::abs(by1)});
+    scale = std::ldexp(1.0, bits - std::ilogb(m) - 1);  // |coordinates| < 2^bits after scaling
+    Piece p{path(s.outer, true)};
+    for (const auto& h : s.holes) p.push_back(path(h, false));
+    pieces = {p};
+    boxes = {Clipper2Lib::GetBounds(p)};
+  }
+  /// The input as the exact rationals that Clipper2 works on.
+  pd::PolygonWithHoles<mpq_class> exact_piece(const Piece& p) const
+  {
+    const mpq_class inv = 1 / mpq_class(scale);
+    auto ring = [&](const Clipper2Lib::Path64& r) {
+      pd::Ring<mpq_class> out;
+      for (const auto& v : r) out.push_back({mpq_class(static_cast<long>(v.x)) * inv, mpq_class(static_cast<long>(v.y)) * inv});
+      return out;
+    };
+    pd::PolygonWithHoles<mpq_class> q{ring(p[0]), {}};
+    for (std::size_t i = 1; i < p.size(); ++i) q.holes.push_back(ring(p[i]));
+    return q;
+  }
+  static void collect(const Clipper2Lib::PolyPath64& node, std::vector<Piece>& out)
+  {
+    for (std::size_t i = 0; i < node.Count(); ++i) {
+      const Clipper2Lib::PolyPath64* outer = node.Child(i);
+      Piece piece{outer->Polygon()};
+      for (std::size_t j = 0; j < outer->Count(); ++j) {
+        piece.push_back(outer->Child(j)->Polygon());
+        collect(*outer->Child(j), out);  // islands inside holes
+      }
+      out.push_back(std::move(piece));
+    }
+  }
+  /// Cuts every piece that the line through a and b crosses; returns the number of pieces cut.
+  std::size_t cut(const pd::Point<double>& a, const pd::Point<double>& b)
+  {
+    // H: the rectangle's part left of the line (Sutherland and Hodgman), its two corners on the line
+    // rounded once.
+    const double dx = b.x - a.x, dy = b.y - a.y;
+    auto side = [&](double x, double y) { return dx * (y - a.y) - dy * (x - a.x); };
+    const double cx[4] = {bx0, bx1, bx1, bx0}, cy[4] = {by0, by0, by1, by1};
+    Clipper2Lib::Path64 H;
+    std::vector<P64> on;
+    for (int i = 0; i < 4; ++i) {
+      const int j = (i + 1) % 4;
+      const double si = side(cx[i], cy[i]), sj = side(cx[j], cy[j]);
+      if (si >= 0) H.push_back(pt(cx[i], cy[i]));
+      if ((si > 0 && sj < 0) || (si < 0 && sj > 0)) {
+        const double t = si / (si - sj);
+        H.push_back(pt(cx[i] + t * (cx[j] - cx[i]), cy[i] + t * (cy[j] - cy[i])));
+        on.push_back(H.back());
+      }
+    }
+    if (on.size() != 2) return 0;  // the line misses the rectangle (cannot happen for these shapes)
+    auto orient = [&](const P64& q) {
+      const i128 c = static_cast<i128>(on[1].x - on[0].x) * (q.y - on[0].y) -
+                         static_cast<i128>(on[1].y - on[0].y) * (q.x - on[0].x);
+      return (c > 0) - (c < 0);
+    };
+    std::vector<Piece> next;
+    std::vector<Clipper2Lib::Rect64> next_boxes;
+    std::size_t cut_pieces = 0;
+    for (std::size_t i = 0; i < pieces.size(); ++i) {
+      const auto& r = boxes[i];
+      const int s0 = orient(P64(r.left, r.top));
+      if (s0 != 0 && orient(P64(r.right, r.top)) == s0 && orient(P64(r.right, r.bottom)) == s0 &&
+          orient(P64(r.left, r.bottom)) == s0) {
+        next.push_back(std::move(pieces[i]));
+        next_boxes.push_back(r);
+        continue;
+      }
+      std::vector<Piece> parts[2];
+      for (int op = 0; op < 2; ++op) {
+        Clipper2Lib::Clipper64 c;
+        c.AddSubject(pieces[i]);
+        c.AddClip({H});
+        Clipper2Lib::PolyTree64 tree;
+        c.Execute(op == 0 ? Clipper2Lib::ClipType::Intersection : Clipper2Lib::ClipType::Difference,
+                  Clipper2Lib::FillRule::NonZero, tree);
+        collect(tree, parts[op]);
+      }
+      if (parts[0].empty() || parts[1].empty()) {  // the line misses the piece or only touches it
+        next.push_back(std::move(pieces[i]));
+        next_boxes.push_back(r);
+        continue;
+      }
+      ++cut_pieces;
+      for (auto& part : parts)
+        for (auto& p : part) {
+          next_boxes.push_back(Clipper2Lib::GetBounds(p));
+          next.push_back(std::move(p));
+        }
+    }
+    pieces = std::move(next);
+    boxes = std::move(next_boxes);
+    return cut_pieces;
+  }
+};
+
+#ifdef PD_HAVE_CGAL
+/// Cutting with CGAL's Boolean set operations on the exact kernel (Epeck): every cut computes
+/// piece ∩ H and piece − H for the half-plane H left of the line, a large rectangle clipped exactly.
+struct CgalSlicer {
+  using Pt = Epeck::Point_2;
+  using Poly = CGAL::Polygon_2<Epeck>;
+  using Pwh = CGAL::Polygon_with_holes_2<Epeck>;
+  std::vector<Pwh> pieces;
+  std::vector<CGAL::Bbox_2> boxes;
+  Pt corner[4];
+
+  using ET = std::decay_t<decltype(CGAL::exact(std::declval<Epeck::FT>()))>;  // mpq_class or Boost's mpq
+  template <class E = ET>
+  static Epeck::FT ft(const mpq_class& v)
+  {
+    if constexpr (std::is_same_v<E, mpq_class>) return Epeck::FT(v);
+    else return Epeck::FT(E(v.get_mpq_t()));
+  }
+  template <class E = ET>
+  static mpq_class q(const Epeck::FT& x)
+  {
+    const E e = CGAL::exact(x);
+    if constexpr (std::is_same_v<E, mpq_class>) return e;
+    else return mpq_class(e.backend().data());
+  }
+  explicit CgalSlicer(const pd::PolygonWithHoles<double>& s)
+  {
+    auto poly = [](const pd::Ring<double>& r, bool ccw) {
+      Poly p;
+      for (const auto& v : r) p.push_back(Pt(v.x, v.y));
+      if (p.is_counterclockwise_oriented() != ccw) p.reverse_orientation();
+      return p;
+    };
+    Pwh p(poly(s.outer, true));
+    for (const auto& h : s.holes) p.add_hole(poly(h, false));
+    pieces = {p};
+    boxes = {p.outer_boundary().bbox()};
+    const CGAL::Bbox_2 b = boxes[0];
+    const double w = std::max(b.xmax() - b.xmin(), b.ymax() - b.ymin());
+    const double x0 = b.xmin() - w, x1 = b.xmax() + w, y0 = b.ymin() - w, y1 = b.ymax() + w;
+    corner[0] = Pt(x0, y0), corner[1] = Pt(x1, y0), corner[2] = Pt(x1, y1), corner[3] = Pt(x0, y1);
+  }
+  std::size_t cut(const Q& a, const Q& b)
+  {
+    const Epeck::Line_2 l(Pt(ft(a.x), ft(a.y)), Pt(ft(b.x), ft(b.y)));
+    auto value = [&](const Pt& p) { return l.a() * p.x() + l.b() * p.y() + l.c(); };
+    Poly H;
+    for (int i = 0; i < 4; ++i) {
+      const Pt &p = corner[i], &r = corner[(i + 1) % 4];
+      const CGAL::Oriented_side si = l.oriented_side(p), sj = l.oriented_side(r);
+      if (si != CGAL::ON_NEGATIVE_SIDE) H.push_back(p);
+      if (si != CGAL::ON_ORIENTED_BOUNDARY && sj != CGAL::ON_ORIENTED_BOUNDARY && si != sj) {
+        const Epeck::FT vp = value(p), t = vp / (vp - value(r));  // exact crossing of the edge p r
+        H.push_back(Pt(p.x() + t * (r.x() - p.x()), p.y() + t * (r.y() - p.y())));
+      }
+    }
+    std::vector<Pwh> next;
+    std::vector<CGAL::Bbox_2> next_boxes;
+    std::size_t cut_pieces = 0;
+    for (std::size_t i = 0; i < pieces.size(); ++i) {
+      const CGAL::Bbox_2& r = boxes[i];
+      const CGAL::Oriented_side s0 = l.oriented_side(Pt(r.xmin(), r.ymin()));
+      if (s0 != CGAL::ON_ORIENTED_BOUNDARY && l.oriented_side(Pt(r.xmax(), r.ymin())) == s0 &&
+          l.oriented_side(Pt(r.xmax(), r.ymax())) == s0 && l.oriented_side(Pt(r.xmin(), r.ymax())) == s0) {
+        next.push_back(std::move(pieces[i]));
+        next_boxes.push_back(r);
+        continue;
+      }
+      std::vector<Pwh> in, out;
+      // Segment traits (Tag_false): with the default polyline traits, a polygon whose hole touches
+      // its outer ring at a vertex, as these operations return after a cut through a hole vertex,
+      // violates the input precondition of the next operation.
+      CGAL::intersection(pieces[i], H, std::back_inserter(in), CGAL::Tag_false());
+      CGAL::difference(pieces[i], H, std::back_inserter(out), CGAL::Tag_false());
+      if (in.empty() || out.empty()) {
+        next.push_back(std::move(pieces[i]));
+        next_boxes.push_back(r);
+        continue;
+      }
+      ++cut_pieces;
+      for (auto* part : {&in, &out})
+        for (auto& p : *part) {
+          next_boxes.push_back(p.outer_boundary().bbox());
+          next.push_back(std::move(p));
+        }
+    }
+    pieces = std::move(next);
+    boxes = std::move(next_boxes);
+    return cut_pieces;
+  }
+  /// The pieces in exact rationals (evaluates CGAL's lazy numbers), in the form the slicer reports
+  /// them: a hole that touches the outer ring at a vertex is merged into that ring (which then
+  /// passes through the vertex twice), and an outer ring that passes through a point twice with
+  /// material on both lobes (two regions that touch at a point) is split into two pieces. The point
+  /// sets are unchanged.
+  std::vector<pd::PolygonWithHoles<mpq_class>> exact_pieces() const
+  {
+    using R = pd::Ring<mpq_class>;
+    auto ring = [](const Poly& p) {
+      R r;
+      for (const auto& v : p.vertices()) r.push_back({q(v.x()), q(v.y())});
+      return r;
+    };
+    std::vector<pd::PolygonWithHoles<mpq_class>> out;
+    for (const auto& p : pieces) {
+      R outer = ring(p.outer_boundary());
+      std::vector<R> holes;
+      for (const auto& h : p.holes()) {
+        R hr = ring(h);
+        std::size_t i = 0, j = 0;
+        bool touch = false;
+        for (i = 0; i < outer.size() && !touch; ++i)
+          for (j = 0; j < hr.size() && !touch; ++j) touch = outer[i] == hr[j];
+        if (!touch) {
+          holes.push_back(std::move(hr));
+          continue;
+        }
+        --i, --j;  // outer[i] == hr[j]: walk round the hole from there (both keep the material on the left)
+        R merged(outer.begin(), outer.begin() + static_cast<std::ptrdiff_t>(i) + 1);
+        for (std::size_t k = 1; k <= hr.size(); ++k) merged.push_back(hr[(j + k) % hr.size()]);
+        merged.insert(merged.end(), outer.begin() + static_cast<std::ptrdiff_t>(i) + 1, outer.end());
+        outer = std::move(merged);
+      }
+      // Split at points visited twice when both lobes are counterclockwise (material on both).
+      std::vector<R> todo{outer}, outers;
+      while (!todo.empty()) {
+        R r = std::move(todo.back());
+        todo.pop_back();
+        bool split = false;
+        for (std::size_t a = 0; a < r.size() && !split; ++a)
+          for (std::size_t b = a + 1; b < r.size() && !split; ++b) {
+            if (!(r[a] == r[b])) continue;
+            R one(r.begin() + static_cast<std::ptrdiff_t>(a), r.begin() + static_cast<std::ptrdiff_t>(b));
+            R two(r.begin() + static_cast<std::ptrdiff_t>(b), r.end());
+            two.insert(two.end(), r.begin(), r.begin() + static_cast<std::ptrdiff_t>(a));
+            if (sgn(pd::signed_area2(one)) > 0 && sgn(pd::signed_area2(two)) > 0) {
+              todo.push_back(std::move(one)), todo.push_back(std::move(two));
+              split = true;
+            }
+          }
+        if (!split) outers.push_back(std::move(r));
+      }
+      for (std::size_t k = 0; k < outers.size(); ++k) {
+        pd::PolygonWithHoles<mpq_class> e{outers[k], {}};
+        for (const R& h : holes)  // a hole goes to the lobe that contains it
+          if (outers.size() == 1 || pd::locate<pd::ExactKernel>(h.front(), outers[k]) == pd::Location::Inside)
+            e.holes.push_back(h);
+        out.push_back(std::move(e));
+      }
+    }
+    return out;
+  }
+};
+#endif
+
+[[maybe_unused]] std::size_t max_bits_of(const std::vector<pd::PolygonWithHoles<mpq_class>>& ps)
+{
+  std::size_t b = 0;
+  for (const auto& p : ps) {
+    for (const auto& v : p.outer) b = std::max({b, pd::detail::bit_size(v.x), pd::detail::bit_size(v.y)});
+    for (const auto& h : p.holes)
+      for (const auto& v : h) b = std::max({b, pd::detail::bit_size(v.x), pd::detail::bit_size(v.y)});
+  }
+  return b;
+}
+
+/// Clipper2 at several integer scales (2^bits bounds the coordinates) on cheese with 16 and 64
+/// holes, 60 cuts of every sequence; compared with the exact pieces of the slicer.
+int run_clipper_scale_suite(std::ostream& csv)
+{
+  csv << "shape,sequence,cuts,bits,exact_pieces,pieces,tiny,area_err\n";
+  for (int h : {16, 64}) {
+    const std::string name = "cheese-" + std::to_string(h);
+    const auto shape = pd::gen::cheese(h, 1);
+    for (const std::string seq : {"random", "axis", "vertex", "repeat", "graze"}) {
+      const auto lines = slice_lines(name, seq, shape, 60);
+      pd::Slicer ours(shape);
+      for (const auto& l : lines) ours.cut_exact(l.a, l.b);
+      for (int bits : {20, 26, 32, 40, 50}) {
+        ClipperSlicer c(shape, bits);
+        const i128 in2 = ClipperSlicer::area2(c.pieces[0]);
+        for (const auto& l : lines) c.cut({l.a.x.get_d(), l.a.y.get_d()}, {l.b.x.get_d(), l.b.y.get_d()});
+        i128 total = 0;
+        std::size_t tiny = 0;
+        for (const auto& p : c.pieces) {
+          const i128 a2 = ClipperSlicer::area2(p);
+          total += a2;
+          tiny += static_cast<double>(a2) < kTiny * static_cast<double>(in2);
+        }
+        const i128 d = total - in2;
+        csv << name << ',' << seq << ',' << lines.size() << ',' << bits << ',' << ours.size() << ',' << c.pieces.size()
+            << ',' << tiny << ',' << static_cast<double>(d < 0 ? -d : d) / static_cast<double>(in2) << '\n';
+      }
+    }
+  }
+  return 0;
+}
+
+int run_slice_suite(std::ostream& csv, int cuts, bool quick, double baseline_budget_s)
+{
+  (void)baseline_budget_s;  // used by the CGAL baseline
+  std::vector<std::pair<std::string, pd::PolygonWithHoles<double>>> shapes;
+  for (int h : quick ? std::vector<int>{16} : std::vector<int>{16, 64, 256})
+    shapes.push_back({"cheese-" + std::to_string(h), pd::gen::cheese(h, 1)});
+  if (!quick) {
+    shapes.push_back({"holes-64", pd::gen::random_holes(64, 1)});
+    for (const Input& in : hole_inputs(true))
+      if (in.name == "legacy-bundled") shapes.push_back({"bundled", in.poly});
+  }
+  csv << "shape,n,holes,method,sequence,cut,pieces,cut_pieces,vertex_contacts,edge_contacts,dangles,symbolic,"
+         "cut_ms,convex_ms,convex_pieces,max_bits,certified,tiny,area_err,split_pieces\n";
+  int failures = 0;
+  using clk = std::chrono::steady_clock;
+  auto ms = [](clk::time_point t0, clk::time_point t1) { return std::chrono::duration<double, std::milli>(t1 - t0).count(); };
+  for (const auto& [name, shape] : shapes) {
+    std::size_t n = shape.outer.size();
+    for (const auto& h : shape.holes) n += h.size();
+    const bool cheese = name.rfind("cheese", 0) == 0;
+    std::vector<std::string> seqs{"random", "axis", "vertex", "repeat"};
+    if (cheese) seqs.push_back("graze");
+    const auto exact_in = pd::convert_polygon<pd::ExactKernel>(shape);
+    const double shape_area = area_of(shape);
+    for (const std::string& seq : seqs) {
+      const std::vector<SliceLine> lines = slice_lines(name, seq, shape, cuts);
+      SliceRow row;
+      row.shape = name, row.seq = seq, row.n = n, row.holes = shape.holes.size();
+
+      // ours: pd::Slicer, certificate after every cut
+      row.method = "ours";
+      pd::Slicer s(shape);
+      if (!s.ok()) {
+        std::cerr << name << ": invalid shape\n";
+        return 1;
+      }
+      for (int k = 0; k < cuts; ++k) {
+        const auto t0 = clk::now();
+        const pd::SliceResult r = s.cut_exact(lines[k].a, lines[k].b);
+        const auto t1 = clk::now();
+        if (!r.ok()) {
+          std::cerr << name << "/" << seq << " cut " << k << ": " << r.diag.message << '\n';
+          ++failures;
+          break;
+        }
+        std::size_t convex_pieces = 0;
+        for (std::size_t i : r.pieces) convex_pieces += s.convex(i).leaves.size();
+        const auto t2 = clk::now();
+        const bool cert = pd::verify_slices<pd::ExactKernel>(exact_in, s.pieces_exact(), s.symbolic()).ok;
+        if (!cert) ++failures;
+        row.cut = k, row.pieces = s.size(), row.cut_pieces = r.cut_pieces;
+        row.vertex_contacts = std::to_string(r.vertex_contacts), row.edge_contacts = std::to_string(r.edge_contacts);
+        row.dangles = std::to_string(r.dangles), row.symbolic = s.symbolic() ? "1" : "0";
+        row.cut_ms = ms(t0, t1), row.convex_ms = std::to_string(ms(t1, t2));
+        row.convex_pieces = std::to_string(convex_pieces), row.max_bits = std::to_string(s.max_bits());
+        row.certified = cert ? "1" : "0";
+        if (k == cuts - 1) {  // slivers, at the end
+          std::size_t tiny = 0;
+          for (std::size_t i = 0; i < s.size(); ++i) tiny += area_of(s.piece(i)) < kTiny * shape_area;
+          row.tiny = std::to_string(tiny);
+        }
+        write_row(csv, row);
+      }
+      row = SliceRow();
+      row.shape = name, row.seq = seq, row.n = n, row.holes = shape.holes.size();
+
+      // Clipper2 on 64-bit integers; certificate against its own rounded input after every cut
+      {
+        row.method = "clipper2";
+        ClipperSlicer c(shape);
+        pd::PolygonWithHoles<mpq_class> rounded_in = c.exact_piece(c.pieces[0]);
+        const i128 in_area2 = ClipperSlicer::area2(c.pieces[0]);
+        for (int k = 0; k < cuts; ++k) {
+          const pd::Point<double> a{lines[k].a.x.get_d(), lines[k].a.y.get_d()};
+          const pd::Point<double> b{lines[k].b.x.get_d(), lines[k].b.y.get_d()};
+          const auto t0 = clk::now();
+          const std::size_t cut_pieces = c.cut(a, b);
+          const auto t1 = clk::now();
+          i128 total = 0;
+          std::size_t tiny = 0;
+          for (const auto& p : c.pieces) {
+            const i128 a2 = ClipperSlicer::area2(p);
+            total += a2;
+            tiny += static_cast<double>(a2) < kTiny * static_cast<double>(in_area2);
+          }
+          row.cut = k, row.pieces = c.pieces.size(), row.cut_pieces = cut_pieces, row.cut_ms = ms(t0, t1);
+          row.tiny = std::to_string(tiny), row.certified.clear();
+          if (k == 0 || k == cuts - 1) {  // the certificate after the first and the last cut
+            std::vector<pd::PolygonWithHoles<mpq_class>> ex;
+            for (const auto& p : c.pieces) ex.push_back(c.exact_piece(p));
+            row.certified = pd::verify_slices<pd::ExactKernel>(rounded_in, ex, true).ok ? "1" : "0";
+          }
+          const i128 d = total - in_area2;
+          std::ostringstream err;
+          err << static_cast<double>(d < 0 ? -d : d) / static_cast<double>(in_area2);
+          row.area_err = err.str();
+          write_row(csv, row);
+        }
+      }
+#ifdef PD_HAVE_CGAL
+      // CGAL Boolean set operations (Epeck); stops when its cut times exceed the budget; certificate
+      // and coordinate sizes after the last cut (evaluating the lazy numbers earlier would change
+      // its timings)
+      {
+        row = SliceRow();
+        row.shape = name, row.method = "cgal-boolean", row.seq = seq, row.n = n, row.holes = shape.holes.size();
+        CgalSlicer c(shape);
+        double total_ms = 0;
+        for (int k = 0; k < cuts; ++k) {
+          const auto t0 = clk::now();
+          const std::size_t cut_pieces = c.cut(lines[k].a, lines[k].b);
+          const auto t1 = clk::now();
+          total_ms += ms(t0, t1);
+          row.cut = k, row.pieces = c.pieces.size(), row.cut_pieces = cut_pieces, row.cut_ms = ms(t0, t1);
+          const bool last = k == cuts - 1 || total_ms > 1000 * baseline_budget_s;
+          if (last) {
+            const auto ex = c.exact_pieces();
+            row.split_pieces = std::to_string(ex.size());
+            const auto rep = pd::verify_slices<pd::ExactKernel>(exact_in, ex, true);
+            const bool cert = rep.ok;
+            if (!cert) std::cerr << '\n' << name << '/' << seq << " cgal-boolean cut " << k << ": " << rep.failure << '\n';
+            row.certified = cert ? "1" : "0", row.max_bits = std::to_string(max_bits_of(ex));
+            std::size_t tiny = 0;
+            for (const auto& p : c.pieces) {
+              double a2 = CGAL::to_double(p.outer_boundary().area());
+              for (const auto& h : p.holes()) a2 += CGAL::to_double(h.area());  // holes are clockwise
+              tiny += a2 < kTiny * shape_area;
+            }
+            row.tiny = std::to_string(tiny);
+          }
+          write_row(csv, row);
+          if (last) break;
+        }
+      }
+#endif
+      csv.flush();
+      std::cerr << '.' << std::flush;
+    }
+  }
+  std::cerr << '\n';
+  return failures == 0 ? 0 : 1;
 }
 
 } // namespace
@@ -437,8 +1035,8 @@ int usage()
 int main(int argc, char** argv)
 {
   std::string suite = "all", csv_path;
-  int repeats = 5;
-  double budget_ms = 5000;
+  int repeats = 5, cuts = 200;
+  double budget_ms = 5000, baseline_budget_s = 120;
   bool quick = false;
   for (int i = 1; i < argc; ++i) {
     const std::string a = argv[i];
@@ -447,9 +1045,23 @@ int main(int argc, char** argv)
     else if (a == "--csv" && i + 1 < argc) csv_path = argv[++i];
     else if (a == "--quick") quick = true;
     else if (a == "--budget-ms" && i + 1 < argc) budget_ms = std::stod(argv[++i]);
+    else if (a == "--cuts" && i + 1 < argc) cuts = std::stoi(argv[++i]);
+    else if (a == "--baseline-budget-s" && i + 1 < argc) baseline_budget_s = std::stod(argv[++i]);
     else return usage();
   }
-  if (suite != "simple" && suite != "holes" && suite != "all" && suite != "scale") return usage();
+  if (suite != "simple" && suite != "holes" && suite != "all" && suite != "scale" && suite != "slice" &&
+      suite != "clipper-scale")
+    return usage();
+  if (suite == "clipper-scale") {
+    std::ofstream file;
+    if (!csv_path.empty()) file.open(csv_path);
+    return run_clipper_scale_suite(csv_path.empty() ? std::cout : file);
+  }
+  if (suite == "slice") {
+    std::ofstream file;
+    if (!csv_path.empty()) file.open(csv_path);
+    return run_slice_suite(csv_path.empty() ? std::cout : file, cuts, quick, baseline_budget_s);
+  }
 
   std::vector<Input> inputs;
   if (suite == "scale") inputs = scale_inputs();

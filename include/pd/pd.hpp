@@ -22,4 +22,5 @@
 #include "pd/kernel/exact.hpp"
 #include "pd/kernel/symbolic.hpp"
 #include "pd/io/rational.hpp"
+#include "pd/slice.hpp"
 #endif

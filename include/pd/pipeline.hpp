@@ -175,18 +175,10 @@ PipelineResult<typename K::FT> decompose_once(PolygonWithHoles<typename K::FT> i
 }
 
 #ifdef PD_HAVE_GMP
-/// Exact pipeline: ExactKernel, and the symbolic kernel if a dangling contact
-/// occurs, evaluated at ε = 0. Repeated consecutive points are dropped, and so
-/// is a convex piece whose area vanishes at ε = 0 (it covers no area, so the
-/// others still tile the input; stats.vanished counts them).
-inline PipelineResult<mpq_class> decompose_exact(const PolygonWithHoles<mpq_class>& input,
-                                                 const PipelineOptions& opt)
+/// A symbolic pipeline result evaluated at ε = 0: repeated consecutive points are dropped, and so is
+/// a convex piece whose area vanishes (counted in stats.vanished).
+inline PipelineResult<mpq_class> pipeline_limit(PipelineResult<EpsQ>&& s)
 {
-  PipelineResult<mpq_class> out = decompose_once<ExactKernel>(input, opt);
-  if (!out.needs_symbolic) return out;
-  PipelineOptions so = opt;
-  so.validate_input = false;  // already validated
-  PipelineResult<EpsQ> s = decompose_once<SymbolicKernel>(to_symbolic(input), so);
   PipelineResult<mpq_class> r;
   r.pool.reserve(s.pool.size());
   for (const auto& p : s.pool) r.pool.push_back(limit_point(p));
@@ -221,6 +213,20 @@ inline PipelineResult<mpq_class> decompose_exact(const PolygonWithHoles<mpq_clas
   }
   r.stats.convex_pieces = r.leaves.size();
   return r;
+}
+
+/// Exact pipeline: ExactKernel, and the symbolic kernel if a dangling contact
+/// occurs, evaluated at ε = 0. Repeated consecutive points are dropped, and so
+/// is a convex piece whose area vanishes at ε = 0 (it covers no area, so the
+/// others still tile the input; stats.vanished counts them).
+inline PipelineResult<mpq_class> decompose_exact(const PolygonWithHoles<mpq_class>& input,
+                                                 const PipelineOptions& opt)
+{
+  PipelineResult<mpq_class> out = decompose_once<ExactKernel>(input, opt);
+  if (!out.needs_symbolic) return out;
+  PipelineOptions so = opt;
+  so.validate_input = false;  // already validated
+  return pipeline_limit(decompose_once<SymbolicKernel>(to_symbolic(input), so));
 }
 #endif
 

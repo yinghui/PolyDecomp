@@ -11,6 +11,10 @@ polydecomp decomposes a **polygon with holes** into **convex pieces** in two sta
 or a **double-precision** kernel, and every exact result can be checked with an independent
 **exact certificate** (`pd::verify_partition`).
 
+`pd::Slicer` cuts a polygon with holes along **arbitrary lines**, as often as wanted, in exact
+arithmetic, for interactive cutting (for example a player slicing a cheese in a game); each piece
+can then be decomposed into convex pieces.
+
 ## Contents
 
 1. Building and installing
@@ -18,13 +22,14 @@ or a **double-precision** kernel, and every exact result can be checked with an 
 3. Quick start
 4. Kernels and what they guarantee
 5. The algorithms and their guarantees
-6. Results
-7. Errors
-8. Input and output formats
-9. Command-line tools
-10. Performance
-11. Limitations
-12. Reproducing the paper's results
+6. Cutting along any line
+7. Results
+8. Errors
+9. Input and output formats
+10. Command-line tools
+11. Performance
+12. Limitations
+13. Reproducing the paper's results
 
 ## 1. Building and installing
 
@@ -100,9 +105,10 @@ opt.on_failure = pd::OnFailure::RetryExact;
 auto fast = pd::decompose<pd::DoubleKernel>(input, opt);
 ```
 
-`examples/` holds three complete programs: `holes_to_convex.cpp` (exact pipeline with the
-certificate), `double_with_retry.cpp` (double precision on a nearly degenerate input) and
-`convex_and_tree.cpp` (convex decomposition and its tree).
+`examples/` holds four complete programs: `holes_to_convex.cpp` (exact pipeline with the
+certificate), `double_with_retry.cpp` (double precision on a nearly degenerate input),
+`convex_and_tree.cpp` (convex decomposition and its tree) and `slice_cheese.cpp` (cutting along
+arbitrary lines, Section 6).
 
 ## 4. Kernels and what they guarantee
 
@@ -124,8 +130,10 @@ exact representation is bounded independently of the recursion depth.
 
 **SymbolicKernel** is used automatically, never directly: when an exact run meets a dangling
 contact (see Section 5), `eliminate_holes` and `decompose` redo the input with this kernel and
-evaluate the result at ε = 0 (`stats.symbolic` is set). Its values are rational functions of ε,
-compared as ε → 0+.
+evaluate the result at ε = 0 (`stats.symbolic` is set); `pd::Slicer` switches to it at its first
+dangling contact (Section 6). Its values are rational functions of ε in lowest terms, compared as
+ε → 0+. A value that does not depend on ε is stored as a plain rational, so the kernel runs at
+about the speed of `ExactKernel` except near the split vertices.
 
 **DoubleKernel.** Coordinates are doubles, but every decision about stored points (the side of
 a line a point lies on, and the orderings derived from it) is exact: a floating-point filter
@@ -220,7 +228,49 @@ algorithms, allows T-junctions, and runs in O(E log E) for E edges in total. It 
 `ExactKernel`; for double results use `pd::check_pieces_approx` (necessary conditions only) or
 the GEOS oracle in `scripts/oracle/`.
 
-## 6. Results
+## 6. Cutting along any line
+
+```cpp
+#include "pd/pd.hpp"
+
+using P = pd::Point<double>;
+pd::Slicer s(pd::gen::cheese(64, 1));             // validates the shape (s.ok(), s.diag())
+pd::SliceResult r = s.cut(P{-9, 0.5}, P{9, -1});  // every piece the line crosses
+r = s.cut(0, P{0, -9}, P{0.2, 9});                // only piece 0
+for (std::size_t i = 0; i < s.size(); ++i) {
+  pd::PolygonWithHoles<double> shown = s.piece(i);    // rounded once, for display
+  pd::PipelineResult<mpq_class> parts = s.convex(i);  // convex pieces, e.g. for physics
+}
+```
+
+`examples/slice_cheese.cpp` is a complete program (cuts, a cut through a vertex made by an earlier
+cut, the certificate and the convex pieces).
+
+A `Slicer` keeps one exact state for all its pieces: the points, the supporting line of every
+edge (input edges and cut lines) and the holes. `cut(a, b)` splits every piece that the line
+through `a` and `b` crosses, `cut(i, a, b)` only piece `i`, and `cut_exact(a, b[, i])` takes exact
+rational points (for example a vertex made by an earlier cut). A cut uses the contact rules of hole elimination
+(Section 5) with the player's line instead of a chosen one, so
+
+- lines through vertices, along edges, through points made by earlier cuts, or repeating an
+  earlier cut are all handled exactly; a piece that the line misses or only touches is kept;
+- the pieces always tile the input, holes that the line misses stay holes of the piece that
+  contains them, and crossed holes become notches;
+- a hole that the line touches in a single vertex is split symbolically, and from then on the
+  state is held in `SymbolicKernel` (`symbolic()`); pieces are reported at ε = 0, where a piece
+  that runs round that hole touches itself at one point (weakly simple);
+- every new point is the intersection of two supporting lines, so the size of every coordinate
+  is bounded by the sizes of the input and of the cut lines, however many cuts follow
+  (`max_bits()`).
+
+`SliceResult` lists the new pieces (`pieces`, indices into the new list), how many pieces were cut,
+the contacts and the dangling contacts; a failure is reported in `diag` and leaves the state
+unchanged. `piece_exact(i)` gives exact coordinates, and `pd::verify_slices(input, pieces,
+weakly_simple)` certifies pieces that still contain holes: every hole of a piece is an input hole,
+used by one piece only, that lies inside that piece (a vertex strictly inside its outer ring and no
+edge meeting that ring), and the outer rings tile the input with those holes filled. `convex(i)` runs the pipeline on piece `i`.
+
+## 7. Results
 
 All three entry points return a result with
 
@@ -236,7 +286,7 @@ together into any node's ring, the root included. `PipelineResult` additionally 
 hole-free pieces (`hole_free`), which piece each convex piece came from (`leaf_source`) and the
 Stage 1 tree.
 
-## 7. Errors
+## 8. Errors
 
 The library does not throw from the algorithms; it reports through `diag.status`:
 
@@ -249,7 +299,7 @@ The library does not throw from the algorithms; it reports through `diag.status`
 The readers throw `pd::ParseError` on malformed files; `pd::convert_polygon` throws
 `std::domain_error` on a non-finite coordinate.
 
-## 8. Input and output formats
+## 9. Input and output formats
 
 - **WKT** (`pd::parse_wkt`, `pd::read_wkt_file`, `pd::write_wkt`,
   `pd::write_wkt_multipolygon`): POLYGON and MULTIPOLYGON. Numbers are read correctly rounded
@@ -260,16 +310,22 @@ The readers throw `pd::ParseError` on malformed files; `pd::convert_polygon` thr
 - **Legacy OBJ** (`pd::read_obj_ring`, `pd::read_obj_rings`): rings exported from Blender, one
   ring per file or several as edge cycles; plane X-Z by default.
 
-## 9. Command-line tools
+## 10. Command-line tools
 
 - `pd_decompose`: decomposes every polygon in a WKT file, or an OBJ input. Options: `--stage
   both|holes|convex`, `--kernel exact|double`, `--verify` (exact certificate), `--retry-exact`,
   `--out` (WKT), `--rational`, `--stats` (JSON lines), `--compare double|naive` (classify a
   floating-point run against the exact one).
 - `pd_validate`: checks the input class with both kernels.
+- `pd_slice`: cuts the first polygon of a WKT file along lines (`--cut X0 Y0 X1 Y1`, `--graze H J`
+  for the exact tangent at vertex J of hole H, or `--through H1 J1 H2 J2` for the line through two
+  input vertices, ring -1 being the outer ring), writes the pieces as WKT with their remaining holes
+  (`--out`) and, with `--convex`, the convex pieces of every piece; `--verify` runs the
+  certificates.
 - `pd_gen`: seeded test inputs (families `row`, `star`, `c`, `cluster`, `grid`, and the
   numerically adversarial `nearcollinear`, `neartouch`, `snapped`; combs; random star-shaped
-  polygons `--star N`; many random holes `--random-holes H`; degenerate cases).
+  polygons `--star N`; many random holes `--random-holes H`; a cheese with H round holes
+  `--cheese H`; degenerate cases).
   The same family and seed give the same polygon on every platform.
 - `pd_decompose --cut-rule farthest|closest|boundary|horizontal` chooses the hole-elimination
   cut (`pd::CutRule`): through the vertex averages of the two holes farthest apart (default) or
@@ -281,9 +337,12 @@ The readers throw `pd::ParseError` on malformed files; `pd::convert_polygon` thr
   merge of CGAL's constrained triangulation as baselines. Results whose pieces use only input
   vertices are checked by the exact certificate (column `certified`). `--suite scale` measures
   how the running times grow, up to 2^16 vertices and 2^14 holes, with a time budget per method
-  (`--budget-ms`), and also times input validation.
+  (`--budget-ms`), and also times input validation. `--suite slice [--cuts N]` cuts cheese, random
+  holes and the sample polygon N times (default 200) by random and by degenerate lines and
+  records, per cut, the time, the pieces, the contacts, the time of the convex decomposition of
+  the new pieces, the largest coordinate size and the exact certificate.
 
-## 10. Performance
+## 11. Performance
 
 Convex decomposition performs `O(n (n_c + 1))` predicate evaluations for `n` vertices and
 `n_c` reflex vertices, so it is quadratic in the worst case (for example on combs). Hole
@@ -297,7 +356,12 @@ scale`): with the double kernel a 65536-vertex star-shaped polygon takes about 7
 65536-vertex comb about 15 s, and 16384 random holes (about 106000 vertices) about 3.3 s, while
 input validation takes about 6 s, 4 ms and 0.5 s on the same inputs.
 
-## 11. Limitations
+A slicer cut compares the line with each piece's bounding box and walks only the pieces it may
+cross, in time linear in their size apart from sorting the crossings. Full lines across a block
+create many pieces (200 random lines across a cheese give about ten thousand), and the time per
+cut grows with the number of pieces each line crosses.
+
+## 12. Limitations
 
 - The input class excludes self-intersecting rings, holes touching each other or the outer
   ring, and nested holes (islands inside holes).
@@ -317,8 +381,12 @@ input validation takes about 6 s, 4 ms and 0.5 s on the same inputs.
 - After a dangling contact, the hole-free pieces of `eliminate_holes` (exact) include a weakly
   simple piece that touches itself at the contact vertex; the pipeline's convex pieces are
   simple. The double kernel uses a fallback line for dangling contacts.
+- `pd::Slicer` works in exact arithmetic only (the double kernel would move a line that comes too
+  close to a vertex). A cut is a full line across the pieces it is applied to; to cut along a
+  finite stroke, apply the line to the pieces the stroke crosses. Convex pieces can have more
+  vertices than some physics engines accept per polygon (Box2D's default is 8).
 
-## 12. Reproducing the paper's results
+## 13. Reproducing the paper's results
 
 `scripts/repro_paper.sh` rebuilds everything, runs the tests on all presets, validates the
 legacy inputs, decomposes and certifies 5000 generated polygons, checks them with an
@@ -328,7 +396,9 @@ environment (`scripts/oracle/setup_venv.sh`). Timings depend on the machine; the
 records the processor and the frequency policy of the benchmark CPU (`PD_BENCH_CPU`, default 2)
 and warns unless its governor is `performance`. For stable timings fix the frequency first (root),
 for example `echo performance | sudo tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor`
-with turbo disabled. Step 10 runs the scaling suite (`SCALE.csv`). It also records the double kernel with exact
-retry on the census inputs (`RETRY.txt`), the test count (`TESTS.txt`) and the degenerate set
-(`DEGENERATE.txt`). The fuzzing campaign is run separately with `scripts/run_fuzz.sh [SECONDS]`
-(clang, preset `clang-fuzz`; logs in `build/clang-fuzz/`).
+with turbo disabled. Step 10 runs the scaling suite (`SCALE.csv`), step 11 the cut-rule ablation
+(`ABLATION.txt`) and step 12 the slicing experiment (`SLICE.csv`, `SLICE.md`). It also records the
+double kernel with exact retry on the census inputs (`RETRY.txt`), the test count (`TESTS.txt`)
+and the degenerate set (`DEGENERATE.txt`). The fuzzing campaign (three targets, the last one for
+the slicer) is run separately with `scripts/run_fuzz.sh [SECONDS]` (clang, preset `clang-fuzz`;
+logs in `build/clang-fuzz/`).

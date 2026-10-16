@@ -13,10 +13,14 @@
 #   9. benchmarks against CGAL and PolyPartition                     (BENCH.csv, BENCH.md)
 #  10. scaling: stars and combs up to 2^16 vertices, up to 2^14 holes  (SCALE.csv, SCALE.md)
 #  11. cut-rule ablation, exact + certificate                         (ABLATION.txt)
+#  12. interactive slicing: 200 cuts per sequence, certificate after
+#      every cut, with the Clipper2 and CGAL Boolean baselines        (SLICE.csv, SLICE.md)
+#      and Clipper2 at five integer scales                            (CLIPPER_SCALE.csv)
 # Needs: GMP, CGAL (libcgal-dev), and the oracle venv (scripts/oracle/setup_venv.sh).
 # Timings depend on the machine. The benchmarks run on CPU ${PD_BENCH_CPU:-2}; the
-# script records its frequency policy in MACHINE.txt and warns unless its governor
-# is "performance" (a fixed frequency needs root, for example
+# script records its frequency policy in MACHINE.txt, samples its average frequency
+# every half second while each benchmark runs (mean and minimum in MACHINE.txt),
+# and warns unless its governor is "performance" (a fixed frequency needs root, for example
 #   echo performance | sudo tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
 # with turbo disabled).
 set -euo pipefail
@@ -27,6 +31,26 @@ py="${PD_ORACLE_VENV:-$HOME/.venvs/pd-oracle}/bin/python"
 cpu="${PD_BENCH_CPU:-2}"
 freq=/sys/devices/system/cpu/cpu${cpu}/cpufreq
 [ -x "${py}" ] || scripts/oracle/setup_venv.sh
+
+# bench NAME COMMAND...: runs a benchmark while another CPU samples the benchmark CPU's average
+# frequency (cpuinfo_avg_freq, kHz) every half second; appends the mean and the minimum to MACHINE.txt.
+bench() {
+  local name=$1 status=0 samples sampler other=0
+  shift
+  [ "${cpu}" = 0 ] && other=1
+  samples=$(mktemp)
+  taskset -c "${other}" sh -c 'while :; do cat "$1" 2>/dev/null || echo 0; sleep 0.5; done' _ \
+    "${freq}/cpuinfo_avg_freq" > "${samples}" &
+  sampler=$!
+  "$@" || status=$?
+  kill "${sampler}" 2>/dev/null || true
+  wait "${sampler}" 2>/dev/null || true
+  awk -v n="${name}" '{ s += $1; c++; if (c == 1 || $1 < m) m = $1 }
+    END { printf "bench kHz during %s: mean %d min %d samples %d\n", n, (c ? s / c : 0), m, c }' \
+    "${samples}" >> "${out}/MACHINE.txt"
+  rm -f "${samples}"
+  return "${status}"
+}
 
 {
   echo "date: $(date -Iseconds)"
@@ -73,11 +97,12 @@ build/gcc-release/pd_gen --degenerate --out build/gcc-release/degenerate.wkt
 build/gcc-release/pd_decompose --verify --wkt build/gcc-release/degenerate.wkt \
   --out build/gcc-release/degenerate.pieces.wkt --stats "${out}/DEGENERATE.jsonl" > "${out}/DEGENERATE.txt" 2>&1
 
-taskset -c "${cpu}" build/gcc-bench/pd_bench --repeats 5 --csv "${out}/BENCH.csv"
-echo "bench avg kHz after BENCH: $(cat ${freq}/cpuinfo_avg_freq 2>/dev/null || echo ?)" >> "${out}/MACHINE.txt"
+bench BENCH taskset -c "${cpu}" build/gcc-bench/pd_bench --repeats 5 --csv "${out}/BENCH.csv"
 python3 scripts/summarize_bench.py "${out}/BENCH.csv" > "${out}/BENCH.md"
-taskset -c "${cpu}" build/gcc-bench/pd_bench --suite scale --repeats 3 --csv "${out}/SCALE.csv"
-echo "bench avg kHz after SCALE: $(cat ${freq}/cpuinfo_avg_freq 2>/dev/null || echo ?)" >> "${out}/MACHINE.txt"
+bench SCALE taskset -c "${cpu}" build/gcc-bench/pd_bench --suite scale --repeats 3 --csv "${out}/SCALE.csv"
 python3 scripts/summarize_bench.py "${out}/SCALE.csv" > "${out}/SCALE.md"
 scripts/run_ablation.sh build/gcc-release "${cpu}" > "${out}/ABLATION.txt"
+bench SLICE taskset -c "${cpu}" build/gcc-bench/pd_bench --suite slice --cuts 200 --csv "${out}/SLICE.csv"
+python3 scripts/summarize_slice.py "${out}/SLICE.csv" > "${out}/SLICE.md"
+taskset -c "${cpu}" build/gcc-bench/pd_bench --suite clipper-scale --csv "${out}/CLIPPER_SCALE.csv"
 echo "results in ${out}/"

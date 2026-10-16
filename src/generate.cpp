@@ -403,6 +403,47 @@ PolygonWithHoles<double> random_holes(int h, std::uint64_t seed)
   return p;
 }
 
+PolygonWithHoles<double> cheese(int h, std::uint64_t seed)
+{
+  if (h < 0) throw std::invalid_argument("cheese: h must not be negative");
+  Rng g(seed * 0x9E3779B97F4A7C15ULL + 0xc4ee5e);
+  const double R = 1.5 + 1.1 * std::sqrt(static_cast<double>(h));
+  const int nout = 64;
+  Ring<double> outer;
+  for (int i = 0; i < nout; ++i) {
+    const double a = kTwoPi * i / nout, rad = R * (1 + g.uniform(-0.02, 0.02));
+    outer.push_back({rad * std::cos(a), rad * std::sin(a)});
+  }
+  PolygonWithHoles<double> p{rounded(outer), {}};
+  // Holes: discs placed one at a time at uniform random positions, rejected if closer than 0.15 to
+  // another disc or to the rim (radius at least 0.98 R minus the sagitta of the 64-gon).
+  struct Disc { double x, y, r; };
+  std::vector<Disc> discs;
+  const long max_tries = 500L * (h + 10);
+  for (long tries = 0; static_cast<int>(discs.size()) < h; ++tries) {
+    if (tries > max_tries) throw std::runtime_error("cheese: no room for the holes");
+    const double r = g.uniform(0.25, 0.9), room = 0.97 * R - r - 0.15;
+    const double s = std::sqrt(g.uniform()), a = g.uniform(0, kTwoPi);
+    if (room <= 0) continue;
+    const double x = s * room * std::cos(a), y = s * room * std::sin(a);
+    bool free = true;
+    for (const Disc& d : discs) free = free && std::hypot(x - d.x, y - d.y) >= r + d.r + 0.15;
+    if (free) discs.push_back({x, y, r});
+  }
+  for (const Disc& d : discs) {
+    const int m = g.integer(8, 16);
+    const double a0 = g.uniform(0, kTwoPi);
+    Ring<double> r;
+    for (int i = 0; i < m; ++i) {
+      const double a = a0 + kTwoPi * i / m;
+      r.push_back({d.x + d.r * std::cos(a), d.y + d.r * std::sin(a)});
+    }
+    p.holes.push_back(rounded(r));
+  }
+  if (!validate<DoubleKernel>(p).ok()) throw std::runtime_error("cheese: invalid polygon");
+  return p;
+}
+
 std::vector<std::pair<std::string, PolygonWithHoles<double>>> degenerate_set()
 {
   auto sq = [](double x0, double y0, double x1, double y1) {

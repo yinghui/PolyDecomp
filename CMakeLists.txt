@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(polydecomp VERSION 1.2.0 LANGUAGES CXX)
+project(polydecomp VERSION 1.3.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -44,15 +44,25 @@ foreach(app pd_validate pd_gen pd_decompose)
   target_link_libraries(${app} PRIVATE pd::polydecomp)
   pd_set_warnings(${app})
 endforeach()
+if(PD_WITH_GMP)  # pd_slice needs the exact kernel
+  add_executable(pd_slice apps/pd_slice.cpp)
+  target_link_libraries(pd_slice PRIVATE pd::polydecomp)
+  pd_set_warnings(pd_slice)
+endif()
 
-# pd_bench: our methods and the vendored PolyPartition baseline always, CGAL
-# baselines with PD_WITH_CGAL (needs GMP). PolyPartition (MIT, third_party/) is
-# compiled only into pd_bench and is not installed.
+# pd_bench: our methods and the vendored PolyPartition and Clipper2 baselines
+# always, CGAL baselines with PD_WITH_CGAL (needs GMP). PolyPartition (MIT) and
+# Clipper2 (Boost) in third_party/ are compiled only into pd_bench and are not
+# installed.
 if(PD_WITH_GMP)
   add_library(pd_polypartition STATIC third_party/polypartition/polypartition.cpp)
   target_include_directories(pd_polypartition SYSTEM PUBLIC third_party/polypartition)
+  add_library(pd_clipper2 STATIC
+    third_party/clipper2/src/clipper.engine.cpp third_party/clipper2/src/clipper.offset.cpp
+    third_party/clipper2/src/clipper.rectclip.cpp third_party/clipper2/src/clipper.triangulation.cpp)
+  target_include_directories(pd_clipper2 SYSTEM PUBLIC third_party/clipper2/include)
   add_executable(pd_bench apps/pd_bench.cpp)
-  target_link_libraries(pd_bench PRIVATE pd::polydecomp pd_polypartition)
+  target_link_libraries(pd_bench PRIVATE pd::polydecomp pd_polypartition pd_clipper2)
   target_compile_definitions(pd_bench PRIVATE PD_DATA_DIR="${PROJECT_SOURCE_DIR}/data")
   pd_set_warnings(pd_bench)
   if(PD_WITH_CGAL)
@@ -68,7 +78,7 @@ if(PD_FUZZ)
   if(NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     message(FATAL_ERROR "PD_FUZZ needs clang (libFuzzer)")
   endif()
-  foreach(target fuzz_wkt fuzz_grid)
+  foreach(target fuzz_wkt fuzz_grid fuzz_slice)
     add_executable(${target} fuzz/${target}.cpp)
     target_link_libraries(${target} PRIVATE pd::polydecomp)
     target_compile_options(${target} PRIVATE -fsanitize=fuzzer)
@@ -109,6 +119,9 @@ install(TARGETS polydecomp EXPORT polydecompTargets
         INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 install(DIRECTORY include/pd DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 install(TARGETS pd_validate pd_gen pd_decompose RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+if(PD_WITH_GMP)
+  install(TARGETS pd_slice RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+endif()
 install(EXPORT polydecompTargets NAMESPACE pd:: DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/polydecomp)
 configure_package_config_file(cmake/polydecompConfig.cmake.in
   ${CMAKE_CURRENT_BINARY_DIR}/polydecompConfig.cmake
