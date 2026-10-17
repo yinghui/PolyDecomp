@@ -10,13 +10,18 @@
 #   7. double kernel with OnFailure::RetryExact on the census inputs  (RETRY.txt)
 #   8. unit-test case count                                           (TESTS.txt)
 #      and the hand-made degenerate set, hole elimination + certificate (DEGENERATE.txt)
-#   9. scaling of hole elimination: random holes up to 2^14, cheese up to 2^12 holes,
-#      against PolyPartition's bridging                               (HOLE_SCALE.csv, .md)
+#   9. scaling of hole elimination: random holes up to 2^14, cheese up to 2^12 holes, against
+#      PolyPartition's and CGAL's bridging and the triangulations of Earcut and CGAL
+#                                                                     (HOLE_SCALE.csv, .md)
 #  10. cut-rule ablation, hole elimination + certificate               (ABLATION.txt)
 #  11. cutting along lines: 200 cuts per sequence, certificate after every cut, with the
 #      Clipper2, CGAL Boolean and CGAL arrangement baselines          (SLICE.csv, SLICE.md)
 #      and Clipper2 at five integer scales                            (CLIPPER_SCALE.csv)
 #  12. strokes on moving pieces: 300 strokes on cheese with 64 and 256 holes (STROKES.csv)
+#  13. state sizes after the last cut of every sequence of step 11, ours against the CGAL
+#      arrangement (deterministic, no timing)                          (SLICE_SIZE.csv)
+#  14. triangulations of the census inputs (Earcut, CGAL's constrained triangulation) under the
+#      exact certificate (no timing)                                  (TRIANGULATE.csv)
 # Needs: GMP, CGAL (libcgal-dev), and the oracle venv (scripts/oracle/setup_venv.sh).
 # Timings depend on the machine. The benchmarks run on CPU ${PD_BENCH_CPU:-2}; the
 # script records its frequency policy in MACHINE.txt, samples its average frequency
@@ -107,4 +112,8 @@ bench SLICE taskset -c "${cpu}" build/gcc-bench/pd_bench --suite slice --cuts 20
 python3 scripts/summarize_slice.py "${out}/SLICE.csv" > "${out}/SLICE.md"
 taskset -c "${cpu}" build/gcc-bench/pd_bench --suite clipper-scale --csv "${out}/CLIPPER_SCALE.csv"
 bench STROKES taskset -c "${cpu}" build/gcc-bench/pd_bench --suite strokes --cuts 300 --csv "${out}/STROKES.csv"
+build/gcc-bench/pd_bench --suite slice-size --cuts 200 --csv "${out}/SLICE_SIZE.csv"
+tri=()
+for f in row star c cluster grid nearcollinear neartouch snapped; do tri+=(--wkt "${C}/${f}.wkt"); done
+build/gcc-bench/pd_bench --suite triangulate "${tri[@]}" --csv "${out}/TRIANGULATE.csv"
 echo "results in ${out}/"

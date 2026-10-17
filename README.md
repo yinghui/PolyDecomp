@@ -17,7 +17,7 @@ Everything runs on an exact rational kernel (GMP); hole elimination and the conv
 also run on a fast double-precision kernel that decides exactly, checks its result and can rerun
 exactly.
 
-Version 1.4.0. Released under the BSD 3-Clause License (see `LICENSE`); cite it as described in
+Version 1.4.1. Released under the BSD 3-Clause License (see `LICENSE`); cite it as described in
 `CITATION.cff`. Repository: <https://github.com/yinghui/PolyDecomp>.
 
 **Documentation:** the user guide (`docs/USER_GUIDE.md`) covers installation, the input class,
@@ -66,7 +66,8 @@ development files are missing. Either install them (e.g. `libstdc++-14-dev`) or 
   `build/gcc-bench/pd_bench --csv bench.csv`, `scripts/summarize_bench.py bench.csv`; the slicing
   experiment: `pd_bench --suite slice --csv slice.csv`, `scripts/summarize_slice.py slice.csv`;
   hole elimination at scale: `pd_bench --suite hole-scale`; strokes on moving pieces:
-  `pd_bench --suite strokes`.
+  `pd_bench --suite strokes`; state sizes against the CGAL arrangement: `pd_bench --suite slice-size`;
+  Earcut's and CGAL's triangulations under the exact certificate: `pd_bench --suite triangulate --wkt FILE`.
 - `scripts/repro_paper.sh` regenerates every result of the accompanying paper in
   `build/paper-results/`.
 
@@ -77,3 +78,5 @@ development files are missing. Either install them (e.g. `libstdc++-14-dev`) or 
   compiled only into `pd_bench` as a baseline. Not part of the library and not installed.
 - `third_party/clipper2/`: Clipper2 2.0.1 by Angus Johnson (Boost Software License 1.0), compiled
   only into `pd_bench` as a baseline for cutting. Not part of the library and not installed.
+- `third_party/earcut/`: earcut.hpp 2.2.4 by Mapbox (ISC license), used only by `pd_bench` as a
+  baseline for removing holes (triangulation). Not part of the library and not installed.

@@ -1,5 +1,25 @@
 # Changelog
 
+## 1.4.1 (2026-10-17)
+
+- `pd_bench --suite slice-size [--cuts N]`: the sizes of the states after the last cut of every
+  sequence of the slice suite, deterministic and untimed: the pieces of `pd::Slicer`, their distinct
+  points and edges, against the CGAL arrangement's vertices, edges and faces, its faces split into
+  material faces, faces inside holes and faces outside the shape. `scripts/repro_paper.sh` runs it
+  as step 13 (`SLICE_SIZE.csv`). The arrangement baseline marks faces inside holes with 2 (outside
+  the shape stays 0); timings and pieces are unchanged.
+- Stronger baselines for removing holes. `third_party/earcut/`: earcut.hpp 2.2.4 (Mapbox, ISC
+  license), used only by `pd_bench`. `pd_bench --suite hole-scale` now also runs Earcut's
+  triangulation and, with CGAL, CGAL's constrained triangulation (`cgal-cdt`) and `connect_holes`
+  (bridging by vertical segments, `cgal-connect-holes`); the triangles of both triangulations are
+  checked by the exact certificate (zero-area triangles dropped).
+- `pd_bench --suite triangulate --wkt FILE [--wkt FILE ...]`: Earcut and CGAL's constrained
+  triangulation on every polygon of the files, each result under the exact certificate, with the
+  exact relative area error (`TRIANGULATE.csv`, repro step 14, on the census inputs). On the 5900
+  census inputs CGAL's triangles always pass; Earcut's fail on 2 near-collinear inputs, where its
+  floating-point collinearity test drops vertices a few units in the last place off an edge and
+  its triangles miss slivers (relative area below 1e-17).
+
 ## 1.4.0 (2026-10-17)
 
 The paper now covers exact cutting and hole elimination; the convex decomposition stays in the

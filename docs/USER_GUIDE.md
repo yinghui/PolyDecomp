@@ -360,9 +360,14 @@ The readers throw `pd::ParseError` on malformed files; `pd::convert_polygon` thr
   the new pieces, the largest coordinate size and the exact certificate, for our slicer and for
   three baselines on the same lines (CGAL's arrangement of segments and Boolean set operations,
   both exact, and Clipper2 on integers). `--suite hole-scale` times hole elimination with both
-  kernels and PolyPartition's bridging on random holes and cheeses with up to 2^14 holes.
+  kernels, PolyPartition's bridging, Earcut's triangulation and, with CGAL, CGAL's `connect_holes` and
+  constrained triangulation on random holes and cheeses with up to 2^14 holes. `--suite triangulate
+  --wkt FILE ...` checks Earcut's and CGAL's triangulations of every polygon in the files with the
+  exact certificate.
   `--suite strokes [--cuts N] [--world FILE]` draws N finite strokes on cheeses whose pieces move
-  apart (Section 6, *Moving pieces*), with the certificate after every stroke.
+  apart (Section 6, *Moving pieces*), with the certificate after every stroke. `--suite slice-size`
+  compares the size of the slicer's state after the last cut of every slice sequence with that of the
+  CGAL arrangement (vertices, edges, and faces in the material, in holes and outside the shape).
 
 ## 11. Performance
 
@@ -427,7 +432,9 @@ kernel and plain floating point against the exact result, the double results thr
 oracle, and the exact retry), the degenerate set, hole elimination at scale (`HOLE_SCALE.csv`),
 the cut-rule ablation (`ABLATION.txt`), the cutting experiment with its three baselines
 (`SLICE.csv`, `SLICE.md`, and Clipper2 at several integer scales, `CLIPPER_SCALE.csv`) and the
-strokes on moving pieces (`STROKES.csv`), and writes everything to `build/paper-results/`. It
+strokes on moving pieces (`STROKES.csv`) and the sizes of the slicer's and the arrangement's states
+(`SLICE_SIZE.csv`) and the exact check of two triangulations of the census inputs
+(`TRIANGULATE.csv`), and writes everything to `build/paper-results/`. It
 needs GMP, CGAL and the oracle's Python environment (`scripts/oracle/setup_venv.sh`). Timings
 depend on the machine; the script records the processor and the frequency policy of the
 benchmark CPU (`PD_BENCH_CPU`, default 2), samples its frequency during each benchmark, and warns

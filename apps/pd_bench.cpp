@@ -4,8 +4,8 @@
 // Hertel-Mehlhorn partition, and of CGAL's convex decompositions when built
 // with PD_WITH_CGAL.
 //
-//   pd_bench [--suite simple|holes|all|scale|hole-scale|slice|strokes|clipper-scale] [--repeats R] [--csv FILE] [--quick]
-//            [--budget-ms T] [--cuts N] [--baseline-budget-s S] [--world FILE]
+//   pd_bench [--suite simple|holes|all|scale|hole-scale|slice|slice-size|strokes|clipper-scale|triangulate] [--repeats R] [--csv FILE] [--quick]
+//            [--budget-ms T] [--cuts N] [--baseline-budget-s S] [--world FILE] [--wkt FILE ...]
 //
 // Every (input, method) pair gives one CSV row:
 //   suite,input,n,holes,reflex,lower_bound,method,status,pieces,median_ms,certified
@@ -68,6 +68,7 @@
 // cgal-vertical (vertical decomposition).
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -89,6 +90,7 @@
 #include "pd/generate.hpp"
 #include "pd/hole_elim.hpp"
 #include "pd/io/obj.hpp"
+#include "pd/io/wkt.hpp"
 #include "pd/kernel/double.hpp"
 #include "pd/kernel/exact.hpp"
 #include "pd/pipeline.hpp"
@@ -97,6 +99,7 @@
 
 #include "clipper2/clipper.engine.h"
 #include "polypartition.h"
+#include "mapbox/earcut.hpp"
 
 #ifdef PD_HAVE_CGAL
 #include <CGAL/Arr_extended_dcel.h>
@@ -104,6 +107,7 @@
 #include <CGAL/Arr_segment_traits_2.h>
 #include <CGAL/Arrangement_2.h>
 #include <CGAL/Boolean_set_operations_2.h>
+#include <CGAL/connect_holes.h>
 #include <CGAL/Exact_predicates_exact_constructions_kernel.h>
 #include <CGAL/Exact_predicates_inexact_constructions_kernel.h>
 #include <CGAL/Partition_traits_2.h>
@@ -234,10 +238,51 @@ std::vector<Method> our_methods()
   return m;
 }
 
+/// Earcut's triangulation of a polygon with holes (holes bridged into the outer ring, then ear
+/// clipping in double precision), as triangles of input points: earcut returns indices into the
+/// concatenated rings.
+std::vector<pd::Ring<double>> earcut_triangles(const pd::PolygonWithHoles<double>& p)
+{
+  using Pt = std::array<double, 2>;
+  std::vector<std::vector<Pt>> poly;
+  std::vector<pd::Point<double>> flat;
+  auto add = [&](const pd::Ring<double>& r) {
+    std::vector<Pt> ring;
+    for (const auto& v : r) {
+      ring.push_back({v.x, v.y});
+      flat.push_back(v);
+    }
+    poly.push_back(std::move(ring));
+  };
+  add(p.outer);
+  for (const auto& h : p.holes) add(h);
+  const std::vector<std::uint32_t> idx = mapbox::earcut<std::uint32_t>(poly);
+  std::vector<pd::Ring<double>> tris;
+  for (std::size_t k = 0; k + 2 < idx.size(); k += 3) tris.push_back({flat[idx[k]], flat[idx[k + 1]], flat[idx[k + 2]]});
+  return tris;
+}
+
+/// The exact certificate for triangles of input points. Triangles of zero area (three collinear
+/// points, decided exactly) are dropped first and counted in `degenerate`: their edges cancel as a
+/// chain, so a triangulation tiles the input with or without them.
+int certify_triangles(const pd::PolygonWithHoles<double>& input, const std::vector<pd::Ring<double>>& tris,
+                      std::size_t* degenerate = nullptr)
+{
+  std::vector<pd::Ring<double>> kept;
+  std::size_t flat = 0;
+  for (const auto& t : tris) {
+    if (pd::DoubleKernel::orient(t[0], t[1], t[2]) == 0) ++flat;
+    else kept.push_back(t);
+  }
+  if (degenerate) *degenerate = flat;
+  return certify_rings(input, std::move(kept));
+}
+
 /// Hole elimination alone (the hole-scale suite): ours with the exact kernel (certified) and the double
-/// kernel (exact rerun on a numerical failure), and PolyPartition's RemoveHoles, which bridges every
-/// hole to the outer ring and returns one weakly simple polygon (a reference for the cost of removing
-/// holes; its output has zero-width bridges and is not certified).
+/// kernel (exact rerun on a numerical failure), PolyPartition's RemoveHoles, which bridges every hole
+/// to the outer ring and returns one weakly simple polygon (its output has zero-width bridges and is
+/// not certified), and Earcut's triangulation (certified). With CGAL, cgal_hole_methods adds CGAL's
+/// constrained triangulation and connect_holes.
 std::vector<Method> hole_methods()
 {
   using EK = pd::ExactKernel;
@@ -279,6 +324,12 @@ std::vector<Method> hole_methods()
                  for (const auto& h : p.holes) add(h, true);
                  TPPLPartition pp;
                  return Result{pp.RemoveHoles(&in, &out) == 1, out.size()};
+               }});
+  m.push_back({"earcut", [](const pd::PolygonWithHoles<double>& p, bool certify) {
+                 const auto tris = earcut_triangles(p);
+                 Result res{!tris.empty(), tris.size()};
+                 if (certify) res.certified = certify_triangles(p, tris);
+                 return res;
                }});
   return m;
 }
@@ -395,6 +446,29 @@ std::vector<std::vector<std::size_t>> hertel_mehlhorn(const std::vector<Epick::P
     out.push_back(std::move(ring));
   }
   return out;
+}
+
+/// CGAL's ways to get rid of holes, for the hole-scale suite: the constrained triangulation of the
+/// polygon with holes (certified; all vertices are input points) and connect_holes, which bridges
+/// every hole to the boundary with a vertical segment and returns one weakly simple polygon (not
+/// certified).
+std::vector<Method> cgal_hole_methods()
+{
+  std::vector<Method> m;
+  m.push_back({"cgal-cdt", [](const pd::PolygonWithHoles<double>& p, bool certify) {
+                 std::vector<CGAL::Polygon_2<Epick>> parts;
+                 CGAL::Polygon_triangulation_decomposition_2<Epick> d;
+                 d(cgal_polygon<Epick>(p), std::back_inserter(parts));
+                 Result res{true, parts.size()};
+                 if (certify) res.certified = certify_rings(p, rings_of(parts));
+                 return res;
+               }});
+  m.push_back({"cgal-connect-holes", [](const pd::PolygonWithHoles<double>& p, bool) {
+                 std::vector<Epeck::Point_2> pts;
+                 CGAL::connect_holes(cgal_polygon<Epeck>(p), std::back_inserter(pts));
+                 return Result{!pts.empty(), 1};
+               }});
+  return m;
 }
 
 std::vector<Method> cgal_methods(bool simple, std::size_t n)
@@ -527,8 +601,8 @@ std::vector<Input> hole_scale_inputs()
 
 int usage()
 {
-  std::cerr << "usage: pd_bench [--suite simple|holes|all|scale|hole-scale|slice|strokes|clipper-scale] [--repeats R] [--csv FILE] [--quick]\n"
-               "                [--budget-ms T] [--cuts N] [--baseline-budget-s S] [--world FILE]\n";
+  std::cerr << "usage: pd_bench [--suite simple|holes|all|scale|hole-scale|slice|slice-size|strokes|clipper-scale|triangulate] [--repeats R] [--csv FILE] [--quick]\n"
+               "                [--budget-ms T] [--cuts N] [--baseline-budget-s S] [--world FILE] [--wkt FILE ...]\n";
   return 2;
 }
 
@@ -955,7 +1029,7 @@ struct ArrSlicer {
   {
     arr.unbounded_face()->set_data(0);
     insert_ring(s.outer, 1);
-    for (const auto& h : s.holes) insert_ring(h, 0);
+    for (const auto& h : s.holes) insert_ring(h, 2);  // 1 material, 2 inside a hole, 0 outside the shape
     double x0 = s.outer[0].x, x1 = x0, y0 = s.outer[0].y, y1 = y0;
     for (const auto& v : s.outer) x0 = std::min(x0, v.x), x1 = std::max(x1, v.x), y0 = std::min(y0, v.y), y1 = std::max(y1, v.y);
     const double w = std::max(x1 - x0, y1 - y0);
@@ -1048,6 +1122,112 @@ int run_clipper_scale_suite(std::ostream& csv)
       }
     }
   }
+  return 0;
+}
+
+#ifdef PD_HAVE_CGAL
+/// State sizes after the last cut of every sequence of the slice suite (deterministic, no timing):
+/// our slicer's pieces, their distinct points and their edges (an edge shared by two pieces counted
+/// once per piece), against the CGAL arrangement's vertices, edges and faces, its faces split into
+/// material faces (the pieces), faces inside holes and faces outside the shape (the unbounded face
+/// included). One row per sequence:
+///   shape,sequence,cuts,pieces,ours_points,ours_edges,arr_vertices,arr_edges,arr_faces,arr_material,arr_hole,arr_outside
+int run_slice_size_suite(std::ostream& csv, int cuts)
+{
+  std::vector<std::pair<std::string, pd::PolygonWithHoles<double>>> shapes;
+  for (int h : {16, 64, 256}) shapes.push_back({"cheese-" + std::to_string(h), pd::gen::cheese(h, 1)});
+  shapes.push_back({"holes-64", pd::gen::random_holes(64, 1)});
+  for (const Input& in : hole_inputs(true))
+    if (in.name == "legacy-bundled") shapes.push_back({"bundled", in.poly});
+  csv << "shape,sequence,cuts,pieces,ours_points,ours_edges,arr_vertices,arr_edges,arr_faces,arr_material,"
+         "arr_hole,arr_outside\n";
+  for (const auto& [name, shape] : shapes) {
+    std::vector<std::string> seqs{"random", "axis", "vertex", "repeat"};
+    if (name.rfind("cheese", 0) == 0) seqs.push_back("graze");
+    for (const std::string& seq : seqs) {
+      const std::vector<SliceLine> lines = slice_lines(name, seq, shape, cuts);
+      pd::Slicer s(shape);
+      ArrSlicer c(shape);
+      for (const auto& l : lines) {
+        if (!s.cut_exact(l.a, l.b).ok()) {
+          std::cerr << name << '/' << seq << ": a cut failed\n";
+          return 1;
+        }
+        c.cut(l.a, l.b);
+      }
+      std::set<std::pair<mpq_class, mpq_class>> points;
+      std::size_t edges = 0;
+      for (const auto& p : s.pieces_exact()) {
+        auto add = [&](const pd::Ring<mpq_class>& r) {
+          edges += r.size();
+          for (const auto& v : r) points.insert({v.x, v.y});
+        };
+        add(p.outer);
+        for (const auto& h : p.holes) add(h);
+      }
+      std::size_t material = 0, hole = 0, outside = 0;
+      for (auto f = c.arr.faces_begin(); f != c.arr.faces_end(); ++f)
+        (f->data() == 1 ? material : f->data() == 2 ? hole : outside) += 1;
+      if (material != s.size()) {
+        std::cerr << name << '/' << seq << ": the arrangement has " << material << " material faces, ours "
+                  << s.size() << " pieces\n";
+        return 1;
+      }
+      csv << name << ',' << seq << ',' << cuts << ',' << s.size() << ',' << points.size() << ',' << edges << ','
+          << c.arr.number_of_vertices() << ',' << c.arr.number_of_edges() << ',' << c.arr.number_of_faces() << ','
+          << material << ',' << hole << ',' << outside << '\n';
+      csv.flush();
+      std::cerr << '.' << std::flush;
+    }
+  }
+  std::cerr << '\n';
+  return 0;
+}
+#endif
+
+/// Triangulations as another way to get pieces without holes, checked on every polygon of the given
+/// WKT files (the census inputs): Earcut and, with CGAL, the constrained triangulation. Both return
+/// triangles of input points, so the exact certificate applies (zero-area triangles dropped and
+/// counted). One row per polygon and method (family = file name without directory and extension):
+///   family,index,n,holes,method,status,triangles,degenerate,certified,area_err
+/// (area_err: |area of the triangles - area of the input| / area of the input, computed exactly).
+int run_triangulate_suite(std::ostream& csv, const std::vector<std::string>& files)
+{
+  csv << "family,index,n,holes,method,status,triangles,degenerate,certified,area_err\n";
+  for (const std::string& path : files) {
+    std::string family = path.substr(path.find_last_of('/') + 1);
+    family = family.substr(0, family.find('.'));
+    const std::vector<pd::PolygonWithHoles<double>> inputs = pd::read_wkt_file(path);
+    for (std::size_t i = 0; i < inputs.size(); ++i) {
+      const auto& p = inputs[i];
+      std::size_t n = p.outer.size();
+      for (const auto& h : p.holes) n += h.size();
+      const auto ex = pd::convert_polygon<pd::ExactKernel>(p);
+      mpq_class in2 = abs(pd::signed_area2(ex.outer));
+      for (const auto& h : ex.holes) in2 -= abs(pd::signed_area2(h));
+      auto row = [&](const char* method, bool ok, const std::vector<pd::Ring<double>>& tris) {
+        std::size_t degenerate = 0;
+        const int cert = ok ? certify_triangles(p, tris, &degenerate) : 0;
+        mpq_class a2 = 0;
+        for (const auto& t : tris) a2 += abs(pd::signed_area2(pd::convert_ring<pd::ExactKernel>(t)));
+        const mpq_class err = abs(a2 - in2) / in2;
+        csv << family << ',' << i << ',' << n << ',' << p.holes.size() << ',' << method << ','
+            << (ok ? "ok" : "failed") << ',' << tris.size() << ',' << degenerate << ',' << cert << ','
+            << err.get_d() << '\n';
+      };
+      const auto ear = earcut_triangles(p);
+      row("earcut", !ear.empty(), ear);
+#ifdef PD_HAVE_CGAL
+      std::vector<CGAL::Polygon_2<Epick>> parts;
+      CGAL::Polygon_triangulation_decomposition_2<Epick> d;
+      d(cgal_polygon<Epick>(p), std::back_inserter(parts));
+      row("cgal-cdt", true, rings_of(parts));
+#endif
+    }
+    csv.flush();
+    std::cerr << '.' << std::flush;
+  }
+  std::cerr << '\n';
   return 0;
 }
 
@@ -1394,6 +1574,7 @@ int run_strokes_suite(std::ostream& csv, int strokes, bool quick, std::ostream* 
 int main(int argc, char** argv)
 {
   std::string suite = "all", csv_path, world_path;
+  std::vector<std::string> wkt_files;
   int repeats = 5, cuts = 200;
   double budget_ms = 5000, baseline_budget_s = 120;
   bool quick = false;
@@ -1407,10 +1588,12 @@ int main(int argc, char** argv)
     else if (a == "--cuts" && i + 1 < argc) cuts = std::stoi(argv[++i]);
     else if (a == "--baseline-budget-s" && i + 1 < argc) baseline_budget_s = std::stod(argv[++i]);
     else if (a == "--world" && i + 1 < argc) world_path = argv[++i];
+    else if (a == "--wkt" && i + 1 < argc) wkt_files.push_back(argv[++i]);
     else return usage();
   }
   if (suite != "simple" && suite != "holes" && suite != "all" && suite != "scale" && suite != "slice" &&
-      suite != "clipper-scale" && suite != "hole-scale" && suite != "strokes")
+      suite != "clipper-scale" && suite != "hole-scale" && suite != "strokes" && suite != "slice-size" &&
+      suite != "triangulate")
     return usage();
   if (suite == "strokes") {
     std::ofstream file;
@@ -1418,6 +1601,22 @@ int main(int argc, char** argv)
     std::ofstream world;
     if (!world_path.empty()) world.open(world_path);
     return run_strokes_suite(csv_path.empty() ? std::cout : file, cuts, quick, world_path.empty() ? nullptr : &world);
+  }
+  if (suite == "triangulate") {
+    if (wkt_files.empty()) return usage();
+    std::ofstream file;
+    if (!csv_path.empty()) file.open(csv_path);
+    return run_triangulate_suite(csv_path.empty() ? std::cout : file, wkt_files);
+  }
+  if (suite == "slice-size") {
+#ifdef PD_HAVE_CGAL
+    std::ofstream file;
+    if (!csv_path.empty()) file.open(csv_path);
+    return run_slice_size_suite(csv_path.empty() ? std::cout : file, cuts);
+#else
+    std::cerr << "--suite slice-size needs CGAL (PD_WITH_CGAL)\n";
+    return 2;
+#endif
   }
   if (suite == "clipper-scale") {
     std::ofstream file;
@@ -1464,6 +1663,8 @@ int main(int argc, char** argv)
 #ifdef PD_HAVE_CGAL
     if (suite != "hole-scale")
       for (auto& m : cgal_methods(simple, n)) methods.push_back(std::move(m));
+    else
+      for (auto& m : cgal_hole_methods()) methods.push_back(std::move(m));
 #endif
     if (!in.series.empty()) {
       methods.push_back({"validate-double", [](const pd::PolygonWithHoles<double>& p, bool) {
