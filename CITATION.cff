@@ -1,8 +1,8 @@
 cff-version: 1.2.0
 message: "If you use this software, please cite it as below."
 title: "PolyDecomp: Exact Cutting and Hole Elimination for Polygons with Holes"
-version: 1.4.1
-date-released: 2026-10-17
+version: 1.4.2
+date-released: 2026-10-25
 license: BSD-3-Clause
 repository-code: "https://github.com/yinghui/PolyDecomp"
 authors:

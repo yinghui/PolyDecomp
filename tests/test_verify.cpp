@@ -78,4 +78,36 @@ TEST_CASE("verify rejects overlaps, gaps, spill-over and bad pieces")
   CHECK_FALSE(verify(kSquare, {hole}, {kSquare}).ok);
 }
 
+
+TEST_CASE("verify_slices matches retained holes up to cyclic rotation and reversal")
+{
+  const auto hole = R({{3, 3}, {7, 3}, {7, 7}, {5, 5}, {3, 7}});
+  const pd::PolygonWithHoles<FT> input{kSquare, {hole}};
+  for (std::size_t shift = 0; shift < hole.size(); ++shift) {
+    auto moved = hole;
+    std::rotate(moved.begin(), moved.begin() + static_cast<std::ptrdiff_t>(shift), moved.end());
+    CHECK(pd::verify_slices<K>(input, {{kSquare, {moved}}}).ok);
+    std::reverse(moved.begin(), moved.end());
+    CHECK(pd::verify_slices<K>(input, {{kSquare, {moved}}}).ok);
+  }
+}
+
+TEST_CASE("verify_slices rejects a self-crossing permutation of a retained hole")
+{
+  const auto hole = R({{3, 3}, {6, 3}, {6, 6}, {3, 6}});
+  const auto bow_tie = R({{3, 3}, {6, 6}, {6, 3}, {3, 6}});
+  const pd::PolygonWithHoles<FT> input{kSquare, {hole}};
+  CHECK_FALSE(pd::verify_slices<K>(input, {{kSquare, {bow_tie}}}).ok);
+}
+
+TEST_CASE("verify_slices rejects a different simple hole with the same vertices and area")
+{
+  const auto hole = R({{3, 3}, {7, 3}, {7, 7}, {5, 5}, {3, 7}});
+  const auto changed = R({{3, 3}, {5, 5}, {7, 3}, {7, 7}, {3, 7}});
+  REQUIRE(pd::conflicting_edge_pairs<K>({changed, {}}, true, 1).empty());
+  REQUIRE(pd::signed_area2(hole) == pd::signed_area2(changed));
+  const pd::PolygonWithHoles<FT> input{kSquare, {hole}};
+  CHECK_FALSE(pd::verify_slices<K>(input, {{kSquare, {changed}}}).ok);
+}
+
 #endif // PD_HAVE_GMP

@@ -196,7 +196,7 @@ VerifyReport verify_partition(const PolygonWithHoles<typename K::FT>& input,
 }
 
 /// Certificate for pieces that may still contain holes, such as those of a Slicer. It accepts iff
-///   (1) every hole of a piece is a hole of the input (the same vertices), kept by exactly one piece,
+///   (1) every hole of a piece is a hole of the input (the same cyclic boundary, up to rotation or reversal), kept by exactly one piece,
 ///       has a vertex strictly inside that piece's outer ring, and has no edge that meets an edge of
 ///       that ring, and
 ///   (2) the outer rings of the pieces tile the input with the kept holes filled in
@@ -205,7 +205,7 @@ VerifyReport verify_partition(const PolygonWithHoles<typename K::FT>& input,
 /// pairwise disjoint interiors that cover the region with the kept holes filled; by (1) the boundary
 /// of a kept hole avoids its piece's outer ring and has a point inside it, so the whole hole lies
 /// inside that ring (and in no other piece), and removing it from that piece leaves a tiling of the
-/// input. Holes are matched in O(h log h) comparisons of vertex lists; the test of (1) compares the
+/// input. Holes are matched in O(h log h) comparisons of canonical cyclic vertex lists; the test of (1) compares the
 /// edges of each kept hole with the edges of its piece's outer ring whose boxes meet the hole's box.
 template <class K>
 VerifyReport verify_slices(const PolygonWithHoles<typename K::FT>& input,
@@ -222,8 +222,19 @@ VerifyReport verify_slices(const PolygonWithHoles<typename K::FT>& input,
   };
   auto less_point = [](const Point<FT>& a, const Point<FT>& b) { return lex_less(a, b); };
   auto key = [&](const Ring<FT>& r) {
-    Key v(r.begin(), r.end());
-    std::sort(v.begin(), v.end(), less_point);
+    // Preserve cyclic adjacency. Sorting vertices would identify different holes
+    // with the same vertex set, even a simple hole and a self-crossing one.
+    // Valid input rings have distinct vertices, so their minimum vertex and the
+    // lexicographically smaller of its neighbours fix a unique unoriented cycle.
+    Key v;
+    if (r.empty()) return v;
+    const std::size_t n = r.size();
+    const std::size_t first = static_cast<std::size_t>(
+        std::min_element(r.begin(), r.end(), less_point) - r.begin());
+    const bool forward = n < 2 || less_point(r[(first + 1) % n], r[(first + n - 1) % n]);
+    v.reserve(n);
+    for (std::size_t k = 0; k < n; ++k)
+      v.push_back(r[forward ? (first + k) % n : (first + n - k) % n]);
     return v;
   };
   auto less_key = [&](const Key& a, const Key& b) {

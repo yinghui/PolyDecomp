@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.4.2 (2026-10-25)
+
+- Fix retained-hole matching in `verify_slices`: compare canonical cyclic boundaries,
+  allowing rotation and reversal, rather than unordered vertex sets. Different simple
+  holes and self-crossing permutations with the same vertices are now rejected.
+  Regression tests also cover valid rotations and reversals.
+
 ## 1.4.1 (2026-10-17)
 
 - `pd_bench --suite slice-size [--cuts N]`: the sizes of the states after the last cut of every
