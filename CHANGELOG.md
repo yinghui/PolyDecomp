@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.4.3 (2026-10-30)
+
+- Automatic cut lines no longer depend on the infinitesimal of a symbolic run. After a dangling
+  contact, the anchor of the single hole rule (and of `CutRule::NearestToBoundary`) averages the
+  values of its vertices at ε = 0. This fixes three cases found in proof reviews: a collapsed
+  two vertex piece reported as success with the default rule, a piece pinched along an outer edge
+  that the weakly simple certificate rejected, and an internal error of `NearestToBoundary` after
+  a later dangling split.
+- A symbolic result omits every trace whose exact area is zero at ε = 0 (`stats.collapsed`
+  counts them, and the tree's leaf indices are renumbered). `pd_decompose` reports `collapsed`.
+- `Slicer`: the floating point box filter is no longer used for a line whose coefficient rounds
+  to zero or to a subnormal double. Such a line could skip a piece that it crosses.
+- Five regression tests (`tests/test_stage1.cpp`, `tests/test_slice.cpp`).
+
 ## 1.4.2 (2026-10-25)
 
 - Fix retained-hole matching in `verify_slices`: compare canonical cyclic boundaries,

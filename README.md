@@ -17,7 +17,7 @@ Everything runs on an exact rational kernel (GMP); hole elimination and the conv
 also run on a fast double-precision kernel that decides exactly, checks its result and can rerun
 exactly.
 
-Version 1.4.2. Released under the BSD 3-Clause License (see `LICENSE`); cite it as described in
+Version 1.4.3. Released under the BSD 3-Clause License (see `LICENSE`); cite it as described in
 `CITATION.cff`. Repository: <https://github.com/yinghui/PolyDecomp>.
 
 **Documentation:** the user guide (`docs/USER_GUIDE.md`) covers installation, the input class,

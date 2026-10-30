@@ -161,7 +161,8 @@ Outcome run(const pd::PolygonWithHoles<double>& in, const Config& cfg)
                 {"degenerate_directions", s.degenerate_directions},
                 {"max_depth", s.max_depth},
                 {"retried_exact", s.retried_exact ? 1u : 0u},
-                {"symbolic", s.symbolic ? 1u : 0u}};
+                {"symbolic", s.symbolic ? 1u : 0u},
+                {"collapsed", s.collapsed}};
   } else {
     if (!in.holes.empty()) {
       o.status = pd::Status::InvalidInput;

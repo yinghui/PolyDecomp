@@ -188,7 +188,10 @@ A hole that meets the line in a single vertex v and lies otherwise on one side (
 contact*) would give a piece that touches itself at v. The exact path then splits that hole
 with the point c = v + ε d on the line (ε an infinitesimal), so that the contact becomes an edge
 on the line, runs both stages on the perturbed polygon, and evaluates the result at ε = 0
-(`stats.dangles`, `stats.symbolic`). The double kernel uses the fallback line instead.
+(`stats.dangles`, `stats.symbolic`). After such a split, a single hole anchor that would use a
+split vertex averages the vertex values at ε = 0, so that every cut line is a fixed rational line.
+A trace whose exact area is zero at ε = 0 encloses no material and is not reported
+(`stats.collapsed`). The double kernel uses the fallback line instead.
 
 The line is replaced by a fallback only if it has no direction (two centroids coincide, or
 `a == c`): a line through the centroid of one of those holes (or, if that centroid is a vertex,
@@ -198,7 +201,7 @@ directions to the vertices, that avoids every vertex. Every cut crosses at least
 With the exact kernel: every cut removes at least one hole, so there are at most `h` cuts for
 `h` holes; the pieces are hole-free and tile the input (their interiors are pairwise disjoint
 and their closures cover it). They are simple, except after a dangling contact, where a piece
-touches itself at that vertex (it is weakly simple).
+may touch itself at that vertex (it is weakly simple).
 
 ### Convex decomposition
 

@@ -107,6 +107,7 @@ struct HoleElimStats {
   std::size_t fallback_rotated = 0;       ///< cuts that used CutFallback::Rotated
   std::size_t fallback_midpoint = 0;      ///< cuts that used CutFallback::EdgeMidpoint
   std::size_t degenerate_directions = 0;  ///< preferred line had no direction
+  std::size_t collapsed = 0;              ///< zero area traces omitted when a symbolic result is evaluated at ε = 0
   bool symbolic = false;                  ///< computed with the symbolic kernel (then ε = 0)
   bool retried_exact = false;             ///< the result comes from an exact rerun (OnFailure::RetryExact)
 };
@@ -459,9 +460,22 @@ typename HoleEliminator<K>::Cut HoleEliminator<K>::choose_cut(const Work& w) con
       }
     }
     const Point<FT> c = centroid(hole);
-    const Point<FT>& a0 = pt(w.outer[prev_index(best, m)].v);
-    const Point<FT>& a1 = pt(w.outer[best].v);
-    const Point<FT>& a2 = pt(w.outer[next_index(best, m)].v);
+    Point<FT> a0 = pt(w.outer[prev_index(best, m)].v);
+    Point<FT> a1 = pt(w.outer[best].v);
+    Point<FT> a2 = pt(w.outer[next_index(best, m)].v);
+#ifdef PD_HAVE_GMP
+    if constexpr (is_symbolic_kernel<K>::value) {
+      // After a dangling contact an outer vertex can be a split vertex v1 + ε d. Average the values
+      // at ε = 0 instead, so that every automatic cut line is a fixed rational line, like a supplied
+      // one. An ε dependent line could isolate a sliver that collapses at ε = 0, pinch a corridor
+      // along an outer edge, or come within O(ε) of a retained hole that a later split then crosses.
+      const auto at_zero = [](const Point<FT>& p) {
+        const Point<mpq_class> l = limit_point(p);
+        return Point<FT>{FT(l.x), FT(l.y)};
+      };
+      a0 = at_zero(a0), a1 = at_zero(a1), a2 = at_zero(a2);
+    }
+#endif
     q0 = {(a0.x + a1.x + a2.x) / 3, (a0.y + a1.y + a2.y) / 3};
     d0 = {c.x - q0.x, c.y - q0.y};
   } else {
@@ -962,11 +976,32 @@ inline HoleElimination<mpq_class> symbolic_limit(HoleElimination<EpsQ>&& s)
   for (const auto& p : s.pool) r.pool.push_back(limit_point(p));
   r.leaves = std::move(s.leaves);
   for (auto& g : r.leaves) drop_coincident(g, r.pool);
+  // A trace with zero exact area at ε = 0 encloses no material (a limiting outside contact): omit it
+  // and renumber the leaves that the tree refers to.
+  std::vector<int> renumber(r.leaves.size(), -1);
+  {
+    std::vector<std::vector<std::uint32_t>> kept;
+    kept.reserve(r.leaves.size());
+    for (std::size_t i = 0; i < r.leaves.size(); ++i) {
+      const auto& g = r.leaves[i];
+      mpq_class area2 = 0;
+      for (std::size_t k = 0; k < g.size(); ++k) {
+        const Point<mpq_class>& p = r.pool[g[k]];
+        const Point<mpq_class>& q = r.pool[g[(k + 1) % g.size()]];
+        area2 += p.x * q.y - q.x * p.y;
+      }
+      if (area2 == 0) continue;
+      renumber[i] = static_cast<int>(kept.size());
+      kept.push_back(std::move(r.leaves[i]));
+    }
+    s.stats.collapsed = r.leaves.size() - kept.size();
+    r.leaves = std::move(kept);
+  }
   for (const auto& n : s.tree) {
     HoleNode<mpq_class> m;
     m.parent = n.parent;
     m.children = n.children;
-    m.leaf = n.leaf;
+    m.leaf = n.leaf >= 0 ? renumber[static_cast<std::size_t>(n.leaf)] : -1;
     m.holes = n.holes;
     m.has_cut = n.has_cut;
     m.cut_point = limit_point(n.cut_point);

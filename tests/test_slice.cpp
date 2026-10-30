@@ -315,4 +315,26 @@ TEST_CASE("slicer: degenerate cut sequences on a grid of holes and on cheese")
     certify_convex(s);
   }
 }
+TEST_CASE("slicer: a line whose coefficients underflow in doubles still cuts the piece")
+{
+  // The box filter rounds the exact line to doubles. Here a coefficient rounds to zero, so the
+  // filter has no error bound and must not skip the piece that the line crosses.
+  const auto pow2 = [](int k) {
+    mpz_class z = 1;
+    if (k >= 0) return mpq_class(z << k);
+    return mpq_class(mpz_class(1), mpz_class(z << -k));
+  };
+  const mpq_class x0 = pow2(100), x1 = pow2(101), y0(3, 2), y1(5, 2);
+  const pd::PolygonWithHoles<mpq_class> in{{{x0, y0}, {x1, y0}, {x1, y1}, {x0, y1}}, {}};
+  REQUIRE(pd::validate<EK>(in).ok());
+  const pd::Point<mpq_class> q{0, 1}, d{-3 * pow2(-999), -pow2(-1098)};
+  const pd::Point<mpq_class> q2{q.x + d.x, q.y + d.y};
+  REQUIRE(EK::orient(q, q2, {x1, y0}) * EK::orient(q, q2, {x0, y1}) < 0);  // the line crosses the box
+  pd::Slicer s(in);
+  const auto res = s.cut_exact(q, q2);
+  REQUIRE_MESSAGE(res.ok(), res.diag.message);
+  CHECK(s.size() == 2);
+  const auto rep = pd::verify_slices<EK>(in, s.pieces_exact(), s.symbolic());
+  CHECK_MESSAGE(rep.ok, rep.failure);
+}
 #endif

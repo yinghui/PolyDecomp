@@ -335,3 +335,112 @@ TEST_CASE("eliminate_holes with the double kernel: self-check and exact retry")
   CHECK_FALSE(fine.stats.retried_exact);
 }
 #endif
+
+#ifdef PD_HAVE_GMP
+// Regression tests for 1.4.3. Before it, a single hole anchor could average a split vertex
+// v1 + eps d, so a later automatic cut line depended on eps. These inputs come from proof reviews.
+namespace {
+
+using Q = mpq_class;
+using QRing = pd::Ring<Q>;
+using QPoly = pd::PolygonWithHoles<Q>;
+
+QRing qbox(long x0, long y0, long x1, long y1) { return {{Q(x0), Q(y0)}, {Q(x1), Q(y0)}, {Q(x1), Q(y1)}, {Q(x0), Q(y1)}}; }
+
+// Every reported piece has positive area, and the pieces pass the (weakly simple) certificate.
+void certify_symbolic(const QPoly& in, const pd::HoleElimination<Q>& r)
+{
+  REQUIRE_MESSAGE(r.ok(), r.diag.message);
+  for (std::size_t i = 0; i < r.leaves.size(); ++i) {
+    CAPTURE(i);
+    CHECK(pd::signed_area2(r.leaf_ring(i)) > 0);
+  }
+  const auto rep = pd::verify_partition<pd::ExactKernel>(in, r.leaf_rings(), false, r.stats.symbolic);
+  CHECK_MESSAGE(rep.ok, rep.failure);
+}
+
+} // namespace
+
+TEST_CASE("an anchor next to a split vertex gives no collapsed piece")
+{
+  // The first cut, y = 0, splits the triangle hole H2 at (0, 0). The anchor of H3 is then next to
+  // the split vertex, and an eps dependent line would cut off a sliver along the edge (40,16)(46,18)
+  // that collapses to a two vertex piece at eps = 0.
+  QPoly in;
+  for (auto [x, y] : std::vector<std::pair<long, long>>{
+           {-220, -20}, {220, -20}, {220, 12}, {-44, 12}, {-44, 14}, {40, 16}, {46, 18}, {-44, 20}, {-220, 20}})
+    in.outer.push_back({Q(x), Q(y)});
+  in.holes = {qbox(-110, -2, -66, 2), qbox(66, -2, 110, 2), {{Q(0), Q(0)}, {Q(22), Q(4)}, {Q(-22), Q(4)}},
+              qbox(11, 9, 33, 11)};
+  REQUIRE(pd::validate<pd::ExactKernel>(in).ok());
+  const auto r = pd::eliminate_holes<pd::ExactKernel>(in);
+  CHECK(r.stats.dangles == 1);
+  CHECK(r.stats.symbolic);
+  CHECK(r.stats.collapsed == 0);
+  certify_symbolic(in, r);
+}
+
+TEST_CASE("an anchor next to a split vertex gives no corridor pinched along an edge")
+{
+  QPoly in;
+  for (auto [x, y] : std::vector<std::pair<long, long>>{
+           {-60, -80}, {60, -80}, {60, 80}, {30, 80}, {30, 0}, {10, 0}, {10, 80}, {-60, 80}})
+    in.outer.push_back({Q(x), Q(y)});
+  in.holes = {{{Q(-21), Q(-60)}, {Q(-19), Q(-61)}, {Q(-20), Q(-59)}},
+              {{Q(-21), Q(60)}, {Q(-19), Q(61)}, {Q(-20), Q(59)}},
+              {{Q(-20), Q(-30)}, {Q(-19), Q(10)}, {Q(-18), Q(20)}},
+              {{Q(-11), Q(0)}, {Q(-9), Q(1)}, {Q(-10), Q(-1)}}};
+  REQUIRE(pd::validate<pd::ExactKernel>(in).ok());
+  const auto r = pd::eliminate_holes<pd::ExactKernel>(in);
+  CHECK(r.stats.symbolic);
+  certify_symbolic(in, r);
+}
+
+TEST_CASE("peeling: a later dangling split does not cross an earlier anchor cut")
+{
+  // With an eps dependent anchor cut, the retained hole H3 came within O(eps) of that cut, and a
+  // later split of H3 crossed it ("the outermost crossings are not on the outer ring").
+  const auto q = [](long n, long d = 1) { return Q(n, d); };
+  QPoly in;
+  in.outer = {{q(-100), q(-100)}, {q(100), q(-100)}, {q(100), q(100)}, {q(-78), q(100)},
+              {q(-79), q(98)},    {q(-80), q(100)},  {q(-100), q(100)}};
+  in.holes.push_back({{q(-9993, 100), q(-999, 10)}, {q(-9987, 100), q(-9993, 100)}, {q(-999, 10), q(-9987, 100)}});
+  in.holes.push_back({{q(0), q(0)}, {q(-2), q(1)}, {q(-1), q(2)}});
+  const pd::Point<Q> c2{q(-1), q(1, 5)};
+  in.holes.push_back({{q(-101, 100), q(1, 5)}, {q(-99, 100), q(21, 100)}, {q(-1), q(19, 100)}});
+  const pd::Point<Q> a2{q(-10189, 300), q(-9889, 300)};
+  const pd::Point<Q> p3{c2.x + (c2.x - a2.x) / 2, c2.y + (c2.y - a2.y) / 2};
+  in.holes.push_back({p3, {p3.x - q(1, 2), p3.y + q(1)}, {p3.x - q(1), p3.y + q(3)}});
+  const pd::Point<Q> a3{q(-79), q(298, 3)};
+  const pd::Point<Q> c4{a3.x + (p3.x - a3.x) / 20, a3.y + (p3.y - a3.y) / 20};
+  in.holes.push_back({{c4.x - q(1, 10), c4.y}, {c4.x + q(1, 10), c4.y + q(1, 10)}, {c4.x, c4.y - q(1, 10)}});
+  REQUIRE(pd::validate<pd::ExactKernel>(in).ok());
+  pd::HoleElimOptions opt;
+  opt.cut_rule = pd::CutRule::NearestToBoundary;
+  const auto r = pd::eliminate_holes<pd::ExactKernel>(in, opt);
+  CHECK(r.stats.dangles >= 1);
+  certify_symbolic(in, r);
+}
+
+TEST_CASE("the symbolic limit omits zero area traces and renumbers the tree")
+{
+  using pd::EpsQ;
+  const EpsQ e = EpsQ::eps();
+  pd::HoleElimination<EpsQ> s;
+  // 0..2: a triangle. 3..5: collinear at eps = 0 but not for eps > 0. 6, 7: a two vertex trace.
+  s.pool = {{EpsQ(0), EpsQ(0)}, {EpsQ(4), EpsQ(0)}, {EpsQ(0), EpsQ(4)}, {EpsQ(1), EpsQ(1)},
+            {EpsQ(3), EpsQ(3) + e},  {EpsQ(2), EpsQ(2)}, {EpsQ(5), EpsQ(5)}, {EpsQ(6), EpsQ(6)}};
+  s.leaves = {{0, 1, 2}, {3, 4, 5}, {6, 7}, {1, 2, 0}};
+  s.tree.resize(5);
+  s.tree[0].children = {1, 2, 3, 4};
+  for (int i = 1; i <= 4; ++i) s.tree[static_cast<std::size_t>(i)].parent = 0, s.tree[static_cast<std::size_t>(i)].leaf = i - 1;
+  const auto r = pd::detail::symbolic_limit(std::move(s));
+  REQUIRE(r.leaves.size() == 2);
+  CHECK(r.stats.collapsed == 2);
+  CHECK(r.tree[1].leaf == 0);
+  CHECK(r.tree[2].leaf == -1);
+  CHECK(r.tree[3].leaf == -1);
+  CHECK(r.tree[4].leaf == 1);
+  CHECK(r.tree[0].leaf == -1);
+}
+#endif

@@ -21,6 +21,7 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <string>
 #include <vector>
@@ -90,7 +91,18 @@ struct SliceState {
   static LineD line_of(const Point<FT>& q, const Point<FT>& d)
   {
     const FT a = -d.y, b = d.x, c = d.y * q.x - d.x * q.y;
-    return {K::to_double(a), K::to_double(b), K::to_double(c)};
+    const LineD l{K::to_double(a), K::to_double(b), K::to_double(c)};
+    // A nonzero coefficient that rounds to zero or to a subnormal double has no relative error
+    // bound, so the filter could wrongly skip a piece that the line crosses. Such a line is never
+    // used to skip a piece: NaN coefficients make misses() return false.
+    const auto lost = [](const FT& exact, double x) {
+      return !(exact == FT(0)) && !(std::abs(x) >= std::numeric_limits<double>::min());
+    };
+    if (lost(a, l.a) || lost(b, l.b) || lost(c, l.c)) {
+      const double nan = std::numeric_limits<double>::quiet_NaN();
+      return {nan, nan, nan};
+    }
+    return l;
   }
   /// True if the whole box lies strictly on one side of the line, certified by a floating point
   /// filter: with exact coefficients the value at a corner differs from the computed one by less
