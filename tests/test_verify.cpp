@@ -110,4 +110,35 @@ TEST_CASE("verify_slices rejects a different simple hole with the same vertices 
   CHECK_FALSE(pd::verify_slices<K>(input, {{kSquare, {changed}}}).ok);
 }
 
+TEST_CASE("weak certificate rejects a clockwise contact ring hidden by a positive local turn")
+{
+  const auto outer = R({{-1,-1},{4,-1},{4,4},{-1,4}});
+  const auto a = R({{0,0},{2,0},{2,1}});
+  const auto b = R({{0,0},{2,2},{1,3}});
+  const auto clockwise = R({{0,0},{2,1},{2,0},{0,0},{1,3},{2,2}});
+  REQUIRE(pd::detail::weakly_simple<K>(clockwise));
+  REQUIRE(pd::ring_orientation<K>(clockwise) > 0);
+  REQUIRE(pd::signed_area2(clockwise) == -6);
+  // Boundary chains cancel, but the positive pieces overlap the entire outer piece.
+  // The clockwise contact ring must not cancel these overlaps in a certificate.
+  const auto rep = pd::verify_partition<K>({outer,{}},{outer,a,b,clockwise},false,true);
+  CHECK_FALSE(rep.ok);
+  CHECK(rep.failure.find("not counter-clockwise") != std::string::npos);
+  CHECK_FALSE(pd::verify_slices<K>({outer,{}},
+      {{outer,{}},{a,{}},{b,{}},{clockwise,{}}},true).ok);
+}
+
+TEST_CASE("weak certificate accepts a positive contact ring and its complementary piece")
+{
+  const auto contact = R({{0,0},{10,0},{10,10},{0,10},{0,0},{1,2},{2,1}});
+  const auto triangle = R({{0,0},{2,1},{1,2}});
+  REQUIRE(pd::signed_area2(contact) > 0);
+  for (std::size_t shift=0;shift<contact.size();++shift) {
+    auto rotated=contact;
+    std::rotate(rotated.begin(),rotated.begin()+static_cast<std::ptrdiff_t>(shift),rotated.end());
+    CHECK(pd::verify_partition<K>({kSquare,{}},{rotated,triangle},false,true).ok);
+    CHECK(pd::verify_slices<K>({kSquare,{}},{{rotated,{}},{triangle,{}}},true).ok);
+  }
+}
+
 #endif // PD_HAVE_GMP

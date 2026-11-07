@@ -9,26 +9,33 @@ INPUTS.wkt holds one POLYGON per line; PIECES.wkt the corresponding line of
 pd_decompose --out (one MULTIPOLYGON per line, or MULTIPOLYGON EMPTY for an
 input that was not decomposed, which is reported and skipped).
 
-A case passes if, with A the input area and tolerance tol (default 1e-9):
+A nonempty case passes the numerical checks if, with A the input area and
+tolerance tol (default 1e-9):
   valid    every non-negligible piece (area > tol * A) is a valid polygon
            without holes; negligible pieces are counted, not failed (exact
-           results can contain pieces too small to survive rounding to doubles)
+           results can contain pieces too small to survive rounding to doubles).
+           With --rational, the exact-source exception below is also permitted.
   inside   sum over pieces of area(piece - input) / A        <= tol
   overlap  sum over piece pairs of area(intersection) / A    <= tol
   area     |sum of piece areas - A| / A                       <= tol
   convex   (with --convex) every non-negligible piece: (hull area - area) / area <= tol
-Pieces inside the input, pairwise almost disjoint and of the right total area
-cover the input up to the tolerance (inclusion-exclusion), so no global union
-is needed.
+For valid sets, exact outside, pair-overlap and area-sum discrepancies at most
+tol*A imply uncovered area at most 3*tol*A. Here the overlay discrepancies use
+snapped geometry, while areas use unsnapped coordinates, so this is not a
+guaranteed bound on coverage of the raw export. Every piece, including negligible
+ones, contributes to the area and overlay totals. Empty outputs are skipped,
+not passed; a zero exit status does not imply every input was checked.
 
-All overlay operations use GEOS snap-rounding (grid 1e-12 times the
-coordinate scale), GEOS's robust fixed-precision mode. Its default
+The acceptance outside/overlap measurements use GEOS snap-rounding (grid 1e-12
+times max(1, maximum absolute input outer coordinate)), GEOS's fixed-precision
+mode. This can change or collapse features. Its default
 floating-point overlay is not reliable on these outputs, where many pieces meet
 along nearly collinear edges with T-junctions: it has returned a union with a
 spurious hole and an intersection equal to one operand while the difference
 was that operand too. For information, the oracle still evaluates the
 floating-point union coverage and pairwise overlap and counts the cases in
-which they exceed the tolerance ("floating-overlay anomalies").
+which they exceed the tolerance ("floating-overlay anomalies"). These
+diagnostics do not change the case's acceptance flag.
 
 Pieces are rounded to doubles, so tiny residuals are expected. Rounding can
 also make a piece invalid: two exact vertices closer than a unit in the last

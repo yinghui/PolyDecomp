@@ -134,7 +134,11 @@ VerifyReport verify_partition(const PolygonWithHoles<typename K::FT>& input,
     if (weakly_simple ? !detail::weakly_simple<K>(r)
                       : !conflicting_edge_pairs<K>(PolygonWithHoles<FT>{r, {}}, true, 1).empty())
       return fail(name + (weakly_simple ? " is not weakly simple" : " is not simple"));
-    if (ring_orientation<K>(r) <= 0) return fail(name + " is not counter-clockwise");
+    // The extremal-vertex turn determines orientation only for a simple ring.
+    // At a repeated extremal vertex, a clockwise weakly simple traversal can
+    // have a positive local turn. Use its exact signed area in weak mode.
+    if (weakly_simple ? signed_area2(r) <= 0 : ring_orientation<K>(r) <= 0)
+      return fail(name + " is not counter-clockwise");
     if (require_convex)
       for (std::size_t i = 0; i < r.size(); ++i)
         if (K::orient(r[prev_index(i, r.size())], r[i], r[next_index(i, r.size())]) < 0)

@@ -230,7 +230,10 @@ so the convex pieces are simple in every case.
 `pd::verify_partition(input, pieces, require_convex, weakly_simple = false)` accepts the pieces
 if and only if every piece is simple (weakly simple, if so requested: it may pass through a
 point twice without crossing itself) and counter-clockwise (and convex, if required) and the oriented boundaries of
-the pieces add up exactly, line by line, to the boundary of the input. By the additivity of
+the pieces add up exactly, line by line, to the boundary of the input. In the weakly simple mode a
+ring is counter-clockwise if its exact signed area is positive (since 1.4.4; earlier versions
+used the turn at the smallest vertex, which can be positive for a clockwise ring that passes
+twice through that vertex). By the additivity of
 winding numbers this proves that the pieces tile the input. It shares no code with the
 algorithms, allows T-junctions, and runs in O(E log E) for E edges in total. It is exact with
 `ExactKernel`; for double results use `pd::check_pieces_approx` (necessary conditions only) or

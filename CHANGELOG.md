@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.4.4 (2026-11-07)
+
+- Fix orientation in the weakly simple mode of `verify_partition` and
+  `verify_slices`: require positive signed area instead of the turn at the
+  lexicographically smallest vertex. A repeated extremal vertex can have a
+  positive local turn in a clockwise ring, allowing negative winding to cancel
+  overlapping positive pieces in an invalid candidate certificate. Two regression
+    tests cover rejection and valid contact-ring partitions under cyclic rotation.
+- Oracle documentation (`scripts/oracle/oracle.py`): states that its acceptance checks are
+  numerical evidence on snapped geometry, not a coverage guarantee for the raw export, and that
+  empty outputs are skipped. Its computation is unchanged.
+
 ## 1.4.3 (2026-10-30)
 
 - Automatic cut lines no longer depend on the infinitesimal of a symbolic run. After a dangling
